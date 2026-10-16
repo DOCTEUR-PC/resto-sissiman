@@ -166,6 +166,60 @@ const App = {
         this.render();
     },
 
+    loginBg: {
+        count: 40,
+        timer: null,
+        order: [],
+        pos: 0,
+        layer: 0,
+        credits: null,
+
+        start() {
+            if (this.timer) return;
+            if (!this.order.length) {
+                this.order = Array.from({ length: this.count }, (_, i) => i + 1);
+                for (let i = this.order.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [this.order[i], this.order[j]] = [this.order[j], this.order[i]];
+                }
+                fetch('images/food/credits.json').then(r => r.json()).then(c => { this.credits = c; }).catch(() => {});
+            }
+            this.timer = setInterval(() => this.next(), 5000);
+            this.next();
+        },
+
+        stop() {
+            clearInterval(this.timer);
+            this.timer = null;
+        },
+
+        url(n) {
+            return 'images/food/' + String(n).padStart(2, '0') + '.jpg';
+        },
+
+        next() {
+            const n = this.order[this.pos % this.order.length];
+            this.pos++;
+            const img = new Image();
+            img.onload = () => {
+                if (!this.timer) return;
+                const slides = document.querySelectorAll('.login-slide');
+                const incoming = slides[this.layer];
+                const outgoing = slides[1 - this.layer];
+                incoming.style.backgroundImage = `url("${img.src}")`;
+                incoming.classList.remove('kb-1', 'kb-2', 'kb-3', 'kb-4');
+                void incoming.offsetWidth;
+                incoming.classList.add('kb-' + (1 + Math.floor(Math.random() * 4)), 'active');
+                outgoing.classList.remove('active');
+                this.layer = 1 - this.layer;
+                const c = this.credits && this.credits[n - 1];
+                document.getElementById('loginCredit').textContent = c ? `Photo : ${c.author || 'Wikimedia Commons'} — ${c.license}` : '';
+            };
+            img.src = this.url(n);
+            new Image().src = this.url(this.order[this.pos % this.order.length]);
+        }
+    },
+
     auth: {
         checkSession() {
             const saved = localStorage.getItem('sissiman-user');
@@ -177,6 +231,7 @@ const App = {
                 } catch(e) { localStorage.removeItem('sissiman-user'); }
             }
             document.getElementById('loginScreen').classList.remove('hidden');
+            App.loginBg.start();
             return false;
         },
 
@@ -192,6 +247,7 @@ const App = {
             App.currentUser = { id: user.id, name: user.name, role: user.role };
             localStorage.setItem('sissiman-user', JSON.stringify(App.currentUser));
             document.getElementById('loginScreen').classList.add('hidden');
+            App.loginBg.stop();
             document.getElementById('loginUser').value = '';
             document.getElementById('loginPass').value = '';
             document.getElementById('loginError').textContent = '';
@@ -213,6 +269,7 @@ const App = {
             localStorage.removeItem('sissiman-user');
             document.getElementById('loginScreen').classList.remove('hidden');
             document.getElementById('userDropdown').classList.remove('open');
+            App.loginBg.start();
         }
     },
 

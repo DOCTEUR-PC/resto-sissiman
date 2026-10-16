@@ -1935,14 +1935,78 @@ body {
     pointer-events: none;
 }
 
+.login-bg {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    background: #1a1612;
+}
+
+.login-bg::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+        radial-gradient(ellipse at center, rgba(20, 16, 12, 0.25) 0%, rgba(20, 16, 12, 0.75) 100%),
+        linear-gradient(180deg, rgba(20, 16, 12, 0.2), rgba(20, 16, 12, 0.55));
+}
+
+.login-slide {
+    position: absolute;
+    inset: -4%;
+    background-size: cover;
+    background-position: center;
+    opacity: 0;
+    transition: opacity 1.4s ease;
+    will-change: transform, opacity;
+}
+
+.login-slide.active { opacity: 1; }
+.login-slide.kb-1 { animation: kb1 7s ease-out forwards; }
+.login-slide.kb-2 { animation: kb2 7s ease-out forwards; }
+.login-slide.kb-3 { animation: kb3 7s ease-out forwards; }
+.login-slide.kb-4 { animation: kb4 7s ease-out forwards; }
+
+@keyframes kb1 { from { transform: scale(1) translate(0, 0); } to { transform: scale(1.12) translate(-2%, -1.5%); } }
+@keyframes kb2 { from { transform: scale(1.12) translate(2%, 1%); } to { transform: scale(1) translate(0, 0); } }
+@keyframes kb3 { from { transform: scale(1.05) translate(-2.5%, 0); } to { transform: scale(1.12) translate(2.5%, -1%); } }
+@keyframes kb4 { from { transform: scale(1.1) translate(1.5%, -2%); } to { transform: scale(1.03) translate(-1.5%, 1.5%); } }
+
+@media (prefers-reduced-motion: reduce) {
+    .login-slide { animation: none !important; }
+}
+
+.login-credit {
+    position: absolute;
+    right: 0.75rem;
+    bottom: 0.5rem;
+    z-index: 1;
+    max-width: 60vw;
+    font-size: 0.65rem;
+    color: rgba(255, 255, 255, 0.55);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .login-card {
+    position: relative;
+    z-index: 1;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 2.5rem 2rem;
-    width: 100%;
+    width: calc(100% - 2rem);
     max-width: 380px;
-    box-shadow: var(--shadow-lg);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+@supports (backdrop-filter: blur(1px)) {
+    .login-card {
+        background: color-mix(in srgb, var(--surface) 86%, transparent);
+        backdrop-filter: blur(14px) saturate(1.2);
+        -webkit-backdrop-filter: blur(14px) saturate(1.2);
+    }
 }
 
 .login-logo {
