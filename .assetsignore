@@ -6,4 +6,5 @@ node_modules
 src
 wrangler.toml
 schema.sql
+migrations
 server.js

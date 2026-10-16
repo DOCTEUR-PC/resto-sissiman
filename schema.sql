@@ -5,7 +5,8 @@ CREATE TABLE IF NOT EXISTS staff (
     role TEXT NOT NULL,
     pass_hash TEXT NOT NULL,
     pass_salt TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    must_change_pw INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -28,4 +29,22 @@ CREATE INDEX IF NOT EXISTS idx_records_updated ON records (updated_at);
 CREATE TABLE IF NOT EXISTS counters (
     name TEXT PRIMARY KEY,
     value INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    staff_id INTEGER,
+    staff_name TEXT,
+    action TEXT NOT NULL,
+    collection TEXT,
+    record_id TEXT,
+    detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit (at);
+
+CREATE TABLE IF NOT EXISTS login_attempts (
+    key TEXT PRIMARY KEY,
+    fails INTEGER NOT NULL,
+    locked_until INTEGER NOT NULL
 );

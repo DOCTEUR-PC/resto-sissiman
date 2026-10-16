@@ -31,6 +31,17 @@ const App = {
             this.uiReady = true;
         }
         this.render();
+        try {
+            const me = await this.api('/me');
+            this.currentUser = me.user;
+            localStorage.setItem('sissiman-user', JSON.stringify(me.user));
+            if (me.mustChangePassword) {
+                this.password.open(true);
+                return;
+            }
+        } catch (e) {
+            if (e.status) return;
+        }
         await this.sync.tick();
         if (!this.currentUser) return;
         if (this.sync.ready) {
@@ -50,6 +61,7 @@ const App = {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
             if (res.status === 401 && path !== '/login') this.auth.expire();
+            if (res.status === 403 && data.error === 'Changement de mot de passe requis') this.password.open(true);
             const err = new Error(data.error || 'Erreur serveur');
             err.status = res.status;
             throw err;
@@ -122,18 +134,45 @@ const App = {
             for (const key of Object.keys(this.synced)) {
                 if (!(key in now)) changes.push({ key, data: null });
             }
+            let reverted = false;
             for (let i = 0; i < changes.length; i += 200) {
                 const chunk = changes.slice(i, i + 200);
-                await App.api('/sync', {
+                const res = await App.api('/sync', {
                     method: 'POST',
                     body: { changes: chunk.map(c => {
                         const slash = c.key.indexOf('/');
                         return { collection: c.key.slice(0, slash), id: c.key.slice(slash + 1), data: c.data };
                     }) }
                 });
+                const rejected = new Set();
+                for (const r of res.rejected || []) {
+                    rejected.add(r.collection + '/' + r.id);
+                    this.revert(r);
+                    reverted = true;
+                }
+                if (res.rejected && res.rejected.length) App.toast(res.rejected[0].error, 'error');
                 for (const c of chunk) {
+                    if (rejected.has(c.key)) continue;
                     if (c.data === null) delete this.synced[c.key]; else this.synced[c.key] = c.data;
                 }
+            }
+            if (reverted) {
+                App.cacheData();
+                App.render();
+            }
+        },
+
+        revert(r) {
+            const key = r.collection + '/' + r.id;
+            const list = App.data[r.collection];
+            const idx = list.findIndex(x => String(x.id) === r.id);
+            if (r.data === null) {
+                if (idx >= 0) list.splice(idx, 1);
+                delete this.synced[key];
+            } else {
+                const item = JSON.parse(r.data);
+                if (idx >= 0) list[idx] = item; else list.push(item);
+                this.synced[key] = r.data;
             }
         },
 
@@ -209,7 +248,7 @@ const App = {
     setupModals() {
         document.querySelectorAll('.modal').forEach(modal => {
             modal.addEventListener('click', (e) => {
-                if (e.target === modal) modal.classList.remove('open');
+                if (e.target === modal && modal.dataset.locked !== 'true') modal.classList.remove('open');
             });
         });
     },
@@ -217,7 +256,7 @@ const App = {
     setupKeyboard() {
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
-                document.querySelectorAll('.modal.open').forEach(m => m.classList.remove('open'));
+                document.querySelectorAll('.modal.open:not([data-locked="true"])').forEach(m => m.classList.remove('open'));
             }
         });
     },
@@ -309,10 +348,113 @@ const App = {
             personnel: 'Gestion du personnel'
         };
         document.getElementById('pageTitle').textContent = titles[page] || page;
+        if (page === 'personnel') this.audit.load();
         if (window.innerWidth <= 768) {
             document.getElementById('sidebar').classList.remove('open');
         }
         this.render();
+    },
+
+    password: {
+        forced: false,
+
+        open(forced) {
+            this.forced = forced;
+            const modal = document.getElementById('modalPassword');
+            modal.dataset.locked = forced ? 'true' : 'false';
+            document.getElementById('passwordClose').style.display = forced ? 'none' : '';
+            document.getElementById('passwordNotice').style.display = forced ? '' : 'none';
+            document.getElementById('passwordForm').reset();
+            document.getElementById('passwordError').textContent = '';
+            document.getElementById('userDropdown').classList.remove('open');
+            modal.classList.add('open');
+            document.getElementById('pwCurrent').focus();
+        },
+
+        close(forceClose) {
+            if (this.forced && !forceClose) return;
+            this.forced = false;
+            const modal = document.getElementById('modalPassword');
+            modal.dataset.locked = 'false';
+            modal.classList.remove('open');
+        },
+
+        async submit(e) {
+            e.preventDefault();
+            const errorEl = document.getElementById('passwordError');
+            const current = document.getElementById('pwCurrent').value;
+            const next = document.getElementById('pwNext').value;
+            if (next !== document.getElementById('pwConfirm').value) {
+                errorEl.textContent = 'Les deux mots de passe ne correspondent pas';
+                return false;
+            }
+            const btn = e.target.querySelector('button[type="submit"]');
+            btn.disabled = true;
+            try {
+                await App.api('/password', { method: 'POST', body: { current, next } });
+            } catch (err) {
+                errorEl.textContent = err.status ? err.message : 'Impossible de joindre le serveur';
+                return false;
+            } finally {
+                btn.disabled = false;
+            }
+            const wasForced = this.forced;
+            this.close(true);
+            App.toast('Mot de passe modifie');
+            if (wasForced) App.start();
+            return false;
+        }
+    },
+
+    audit: {
+        labels: {
+            creation: 'a cree', modification: 'a modifie', suppression: 'a supprime', refus: 'action refusee :',
+            login: "s'est connecte", login_echec: 'Echec de connexion', mot_de_passe: 'a change son mot de passe'
+        },
+        collections: {
+            orders: 'commande', payments: 'paiement', menuItems: 'plat', categories: 'categorie', tables: 'table', staff: 'membre'
+        },
+
+        async load() {
+            const list = document.getElementById('auditList');
+            if (!App.can('page.personnel')) return;
+            try {
+                const { entries } = await App.api('/audit?limit=150');
+                list.innerHTML = entries.length ? entries.map(e => this.row(e)).join('') : '<p class="empty-state">Aucune activite</p>';
+            } catch (err) {
+                list.innerHTML = '<p class="empty-state">Journal indisponible</p>';
+            }
+        },
+
+        row(e) {
+            const d = new Date(e.at);
+            const time = d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) + ' ' +
+                d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+            let detail = {};
+            try { detail = JSON.parse(e.detail) || {}; } catch (err) { /* ignore */ }
+            const what = [this.labels[e.action] || e.action];
+            if (e.collection && e.action !== 'login' && e.action !== 'mot_de_passe' && e.action !== 'login_echec') {
+                what.push(this.collections[e.collection] || e.collection);
+            }
+            if (e.action === 'refus') what.push('— ' + (detail.raison || ''));
+            else if (e.action === 'login_echec') what.push(`(${detail.username || '?'})${detail.verrouille ? ' — compte bloque 15 min' : ''}`);
+            else if (e.action === 'modification') {
+                what.push(Object.entries(detail).map(([k, v]) => `${k}: ${this.val(v[0])} → ${this.val(v[1])}`).join(', '));
+            } else if (detail && typeof detail === 'object') {
+                what.push(Object.entries(detail).filter(([k]) => k !== 'ip').map(([k, v]) => `${k} ${this.val(v)}`).join(', '));
+            }
+            return `<div class="audit-row ${App.esc(e.action)}">
+                <span class="audit-time">${App.esc(time)}</span>
+                <span class="audit-who">${App.esc(e.staff_name || '—')}</span>
+                <span class="audit-what">${App.esc(what.join(' '))}</span>
+            </div>`;
+        },
+
+        val(v) {
+            if (v === null || v === undefined) return '—';
+            if (typeof v === 'object') return Array.isArray(v) ? `${v.length} element(s)` : '{…}';
+            return String(v).slice(0, 40);
+        }
     },
 
     loginBg: {
@@ -398,10 +540,8 @@ const App = {
                 App.token = res.token;
                 App.currentUser = res.user;
                 localStorage.setItem('sissiman-token', res.token);
-                localStorage.setItem('sissiman-user', JSON.stringify(res.user));
-            } catch (err) {
-                errorEl.textContent = err.status === 401 ? 'Identifiant ou mot de passe incorrect'
-                    : err.status ? err.message : 'Impossible de joindre le serveur';
+                localStorage.setItem('sissiman-user', JSON.stringify(res.user));            } catch (err) {
+                errorEl.textContent = err.status ? err.message : 'Impossible de joindre le serveur';
                 return false;
             } finally {
                 btn.disabled = false;
@@ -421,6 +561,7 @@ const App = {
             App.staff = [];
             localStorage.removeItem('sissiman-user');
             localStorage.removeItem('sissiman-token');
+            App.password.close(true);
         },
 
         showLogin() {
@@ -541,11 +682,39 @@ const App = {
         this.updateBadge();
     },
 
+    // Mirrors the server rules in src/worker.js; the server remains the authority.
+    PERMS: {
+        'page.dashboard': ['gerant', 'caissier'],
+        'page.tables': ['gerant', 'caissier', 'serveur'],
+        'page.orders': ['gerant', 'caissier', 'serveur', 'cuisinier'],
+        'page.menu': ['gerant', 'caissier', 'serveur', 'cuisinier'],
+        'page.caisse': ['gerant', 'caissier'],
+        'page.cuisine': ['gerant', 'caissier', 'serveur', 'cuisinier'],
+        'page.rapports': ['gerant'],
+        'page.personnel': ['gerant'],
+        'tables.manage': ['gerant'],
+        'menu.manage': ['gerant'],
+        'menu.availability': ['gerant', 'cuisinier'],
+        'orders.create': ['gerant', 'caissier', 'serveur'],
+        'orders.ready': ['gerant', 'cuisinier', 'serveur'],
+        'orders.serve': ['gerant', 'caissier', 'serveur'],
+        'orders.cancel': ['gerant', 'caissier'],
+        'payments.create': ['gerant', 'caissier']
+    },
+
+    can(perm) {
+        return !!this.currentUser && (this.PERMS[perm] || []).includes(this.currentUser.role);
+    },
+
     applyPermissions() {
-        const role = this.currentUser ? this.currentUser.role : 'serveur';
-        document.querySelectorAll('.nav-item[data-role]').forEach(item => {
-            item.style.display = (item.dataset.role === role || role === 'gerant') ? '' : 'none';
+        document.querySelectorAll('[data-perm]').forEach(el => {
+            el.style.display = this.can(el.dataset.perm) ? '' : 'none';
         });
+        const active = document.querySelector('.nav-item.active');
+        if (this.currentUser && active && !this.can('page.' + active.dataset.page)) {
+            const first = [...document.querySelectorAll('.nav-item')].find(n => this.can('page.' + n.dataset.page));
+            if (first) this.navigateTo(first.dataset.page);
+        }
     },
 
     updateBadge() {
@@ -651,8 +820,8 @@ const App = {
                     <div class="table-main-action">${mainBtn}</div>
                     <div class="table-actions">
                         ${t.status === 'libre' ? `<button class="btn-icon btn-warning" title="Reserver" onclick="event.stopPropagation(); App.tables.setStatus('${t.id}','reservee')"><svg viewBox="0 0 24 24"><path d="M19 4H5a2 2 0 00-2 2v14l4-4h12a2 2 0 002-2V6a2 2 0 00-2-2z"/></svg></button>` : ''}
-                        <button class="btn-icon btn-secondary" title="Modifier" onclick="event.stopPropagation(); App.tables.edit('${t.id}')"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
-                        <button class="btn-icon btn-danger" title="Supprimer" onclick="event.stopPropagation(); App.tables.remove('${t.id}')"><svg viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg></button>
+                        ${App.can('tables.manage') ? `<button class="btn-icon btn-secondary" title="Modifier" onclick="event.stopPropagation(); App.tables.edit('${t.id}')"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+                        <button class="btn-icon btn-danger" title="Supprimer" onclick="event.stopPropagation(); App.tables.remove('${t.id}')"><svg viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg></button>` : ''}
                     </div>
                 </div>`;
             }).join('');
@@ -752,9 +921,9 @@ const App = {
                     <span class="order-amount">${App.fmt(o.total)}</span>
                     <span class="order-status ${App.esc(o.status)}">${App.esc(o.status.replace('_', ' '))}</span>
                     <div class="order-actions">
-                        ${o.status === 'en_cours' ? `<button class="btn btn-small btn-warning" onclick="App.orders.updateStatus('${o.id}','prete')">Prete</button>` : ''}
-                        ${o.status === 'prete' ? `<button class="btn btn-small btn-success" onclick="App.orders.updateStatus('${o.id}','servie')">Servir</button>` : ''}
-                        ${o.status !== 'payee' && o.status !== 'annulee' ? `<button class="btn btn-small btn-danger" onclick="App.orders.updateStatus('${o.id}','annulee')">Annuler</button>` : ''}
+                        ${o.status === 'en_cours' && App.can('orders.ready') ? `<button class="btn btn-small btn-warning" onclick="App.orders.updateStatus('${o.id}','prete')">Prete</button>` : ''}
+                        ${o.status === 'prete' && App.can('orders.serve') ? `<button class="btn btn-small btn-success" onclick="App.orders.updateStatus('${o.id}','servie')">Servir</button>` : ''}
+                        ${o.status !== 'payee' && o.status !== 'annulee' && App.can('orders.cancel') ? `<button class="btn btn-small btn-danger" onclick="App.orders.updateStatus('${o.id}','annulee')">Annuler</button>` : ''}
                     </div>
                 </div>`;
             }).join('');
@@ -967,9 +1136,9 @@ const App = {
                     </div>
                     <div class="menu-item-price">${App.fmt(m.price)}</div>
                     <div class="menu-item-actions">
-                        <button class="btn btn-small ${m.available ? 'btn-warning' : 'btn-success'}" onclick="App.menu.toggleAvail('${m.id}')">${m.available ? 'Indispo' : 'Dispo'}</button>
-                        <button class="btn btn-small btn-secondary" onclick="App.menu.editItem('${m.id}')">Modifier</button>
-                        <button class="btn btn-small btn-danger" onclick="App.menu.removeItem('${m.id}')">Suppr</button>
+                        ${App.can('menu.availability') ? `<button class="btn btn-small ${m.available ? 'btn-warning' : 'btn-success'}" onclick="App.menu.toggleAvail('${m.id}')">${m.available ? 'Indispo' : 'Dispo'}</button>` : ''}
+                        ${App.can('menu.manage') ? `<button class="btn btn-small btn-secondary" onclick="App.menu.editItem('${m.id}')">Modifier</button>
+                        <button class="btn btn-small btn-danger" onclick="App.menu.removeItem('${m.id}')">Suppr</button>` : ''}
                     </div>
                 </div>`;
             }).join('');
@@ -1263,8 +1432,8 @@ const App = {
                     </div>
                     ${o.note ? `<div class="cuisine-ticket-note">${App.esc(o.note)}</div>` : ''}
                     <div class="cuisine-ticket-actions">
-                        ${o.status === 'en_cours' ? `<button class="btn btn-primary" onclick="App.cuisine.markReady('${o.id}')">Pret !</button>` : ''}
-                        ${o.status === 'prete' ? `<button class="btn btn-success" onclick="App.orders.updateStatus('${o.id}','servie')">Servie</button>` : ''}
+                        ${o.status === 'en_cours' && App.can('orders.ready') ? `<button class="btn btn-primary" onclick="App.cuisine.markReady('${o.id}')">Pret !</button>` : ''}
+                        ${o.status === 'prete' && App.can('orders.serve') ? `<button class="btn btn-success" onclick="App.orders.updateStatus('${o.id}','servie')">Servie</button>` : ''}
                     </div>
                 </div>`;
             }).join('');
@@ -1483,7 +1652,7 @@ const App = {
             document.getElementById('staffName').value = '';
             document.getElementById('staffUsername').value = '';
             document.getElementById('staffPassword').value = '';
-            document.getElementById('staffPassword').placeholder = 'Mot de passe (6 caracteres min.)';
+            document.getElementById('staffPassword').placeholder = 'Mot de passe provisoire (8 caracteres min.)';
             document.getElementById('staffRole').value = 'serveur';
             document.getElementById('modalPersonnel').classList.add('open');
         },
@@ -1523,7 +1692,7 @@ const App = {
                     App.toast('Membre modifie');
                 } else {
                     await App.api('/staff', { method: 'POST', body: { name, username, password, role } });
-                    App.toast('Membre ajoute');
+                    App.toast('Membre ajoute : il choisira son mot de passe a la 1re connexion');
                 }
             } catch (e) {
                 App.toast(e.status ? e.message : 'Connexion impossible', 'error');
