@@ -4,44 +4,188 @@ const App = {
         categories: [],
         menuItems: [],
         orders: [],
-        payments: [],
-        nextOrderId: 1
+        payments: []
     },
 
-    defaultStaff: [
-        { id: 1, username: 'admin', password: 'admin123', name: 'Administrateur', role: 'gerant' },
-        { id: 2, username: 'caisse1', password: 'caisse123', name: 'Caissier 1', role: 'caissier' },
-        { id: 3, username: 'serveur1', password: 'serveur123', name: 'Serveur 1', role: 'serveur' }
-    ],
-
-    get staff() {
-        const saved = localStorage.getItem('sissiman-staff');
-        return saved ? JSON.parse(saved) : this.defaultStaff;
-    },
-
-    set staff(val) {
-        localStorage.setItem('sissiman-staff', JSON.stringify(val));
-    },
-
-    saveStaff() {
-        localStorage.setItem('sissiman-staff', JSON.stringify(this.staff));
-    },
-
+    staff: [],
     currentUser: null,
+    token: localStorage.getItem('sissiman-token'),
+    uiReady: false,
 
     init() {
         this.setupTheme();
         if (!this.auth.checkSession()) return;
+        this.start();
+    },
+
+    async start() {
         this.loadData();
-        this.setupNav();
-        this.startClock();
-        this.setupUserMenu();
-        this.setupSidebar();
-        this.setupIconPicker();
-        this.setupModals();
-        this.setupKeyboard();
-        this.seedDefaults();
+        if (!this.uiReady) {
+            this.setupNav();
+            this.startClock();
+            this.setupUserMenu();
+            this.setupSidebar();
+            this.setupIconPicker();
+            this.setupModals();
+            this.setupKeyboard();
+            this.uiReady = true;
+        }
         this.render();
+        await this.sync.tick();
+        if (!this.currentUser) return;
+        if (this.sync.ready) {
+            this.seedDefaults();
+            await this.loadStaff();
+        } else {
+            this.toast('Serveur injoignable : affichage des donnees locales', 'error');
+        }
+        this.render();
+        this.sync.start();
+    },
+
+    async api(path, { method = 'GET', body } = {}) {
+        const headers = { 'Content-Type': 'application/json' };
+        if (this.token) headers.Authorization = 'Bearer ' + this.token;
+        const res = await fetch('/api' + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            if (res.status === 401 && path !== '/login') this.auth.expire();
+            const err = new Error(data.error || 'Erreur serveur');
+            err.status = res.status;
+            throw err;
+        }
+        return data;
+    },
+
+    async loadStaff() {
+        try {
+            this.staff = (await this.api('/staff')).staff;
+        } catch (e) { /* garde la liste actuelle */ }
+    },
+
+    sync: {
+        COLLECTIONS: ['tables', 'categories', 'menuItems', 'orders', 'payments'],
+        synced: {},
+        since: 0,
+        ready: false,
+        online: true,
+        busy: false,
+        timer: null,
+        pushTimer: null,
+
+        snapshot() {
+            const m = {};
+            for (const c of this.COLLECTIONS) {
+                for (const it of App.data[c]) m[c + '/' + it.id] = JSON.stringify(it);
+            }
+            return m;
+        },
+
+        apply(records) {
+            let changed = false;
+            for (const r of records) {
+                if (!this.COLLECTIONS.includes(r.collection)) continue;
+                const key = r.collection + '/' + r.id;
+                const list = App.data[r.collection];
+                const idx = list.findIndex(x => String(x.id) === r.id);
+                if (r.deleted) {
+                    if (idx >= 0) { list.splice(idx, 1); changed = true; }
+                    delete this.synced[key];
+                } else if (this.synced[key] !== r.data || idx < 0) {
+                    const item = JSON.parse(r.data);
+                    if (idx >= 0) list[idx] = item; else list.push(item);
+                    this.synced[key] = r.data;
+                    changed = true;
+                }
+            }
+            return changed;
+        },
+
+        async initial() {
+            const res = await App.api('/sync?since=0');
+            this.since = res.now - 5000;
+            this.synced = {};
+            // Base vide : on garde les donnees locales, elles seront envoyees au prochain push.
+            if (res.records.length > 0) {
+                for (const c of this.COLLECTIONS) App.data[c] = [];
+                this.apply(res.records);
+            }
+            this.ready = true;
+        },
+
+        async push() {
+            const now = this.snapshot();
+            const changes = [];
+            for (const [key, data] of Object.entries(now)) {
+                if (this.synced[key] !== data) changes.push({ key, data });
+            }
+            for (const key of Object.keys(this.synced)) {
+                if (!(key in now)) changes.push({ key, data: null });
+            }
+            for (let i = 0; i < changes.length; i += 200) {
+                const chunk = changes.slice(i, i + 200);
+                await App.api('/sync', {
+                    method: 'POST',
+                    body: { changes: chunk.map(c => {
+                        const slash = c.key.indexOf('/');
+                        return { collection: c.key.slice(0, slash), id: c.key.slice(slash + 1), data: c.data };
+                    }) }
+                });
+                for (const c of chunk) {
+                    if (c.data === null) delete this.synced[c.key]; else this.synced[c.key] = c.data;
+                }
+            }
+        },
+
+        async tick() {
+            if (this.busy || !App.currentUser) return;
+            this.busy = true;
+            try {
+                if (!this.ready) await this.initial();
+                await this.push();
+                const res = await App.api('/sync?since=' + this.since);
+                this.since = res.now - 5000;
+                if (this.apply(res.records)) {
+                    App.cacheData();
+                    App.render();
+                }
+                this.setOnline(true);
+            } catch (e) {
+                if (!e.status) this.setOnline(false);
+            } finally {
+                this.busy = false;
+            }
+        },
+
+        schedulePush() {
+            clearTimeout(this.pushTimer);
+            this.pushTimer = setTimeout(() => this.tick(), 300);
+        },
+
+        setOnline(online) {
+            if (online === this.online) return;
+            this.online = online;
+            App.toast(online ? 'Connexion retablie' : 'Connexion perdue : modifications en attente', online ? 'success' : 'error');
+        },
+
+        start() {
+            this.stop();
+            this.timer = setInterval(() => this.tick(), 4000);
+        },
+
+        stop() {
+            clearInterval(this.timer);
+            clearTimeout(this.pushTimer);
+            this.timer = null;
+        },
+
+        reset() {
+            this.stop();
+            this.synced = {};
+            this.since = 0;
+            this.ready = false;
+            this.online = true;
+        }
     },
 
     esc(str) {
@@ -87,8 +231,13 @@ const App = {
         }
     },
 
-    saveData() {
+    cacheData() {
         localStorage.setItem('restoManagerData', JSON.stringify(this.data));
+    },
+
+    saveData() {
+        this.cacheData();
+        this.sync.schedulePush();
     },
 
     seedDefaults() {
@@ -223,53 +372,74 @@ const App = {
     auth: {
         checkSession() {
             const saved = localStorage.getItem('sissiman-user');
-            if (saved) {
+            if (saved && App.token) {
                 try {
                     App.currentUser = JSON.parse(saved);
                     document.getElementById('loginScreen').classList.add('hidden');
                     return true;
-                } catch(e) { localStorage.removeItem('sissiman-user'); }
+                } catch(e) { /* session locale corrompue */ }
             }
+            this.clearSession();
             document.getElementById('loginScreen').classList.remove('hidden');
             App.loginBg.start();
             return false;
         },
 
-        login(e) {
+        async login(e) {
             e.preventDefault();
+            const btn = e.target.querySelector('button[type="submit"]');
+            const errorEl = document.getElementById('loginError');
             const username = document.getElementById('loginUser').value.trim();
             const password = document.getElementById('loginPass').value;
-            const user = App.staff.find(u => u.username === username && u.password === password);
-            if (!user) {
-                document.getElementById('loginError').textContent = 'Identifiant ou mot de passe incorrect';
+            btn.disabled = true;
+            errorEl.textContent = '';
+            try {
+                const res = await App.api('/login', { method: 'POST', body: { username, password } });
+                App.token = res.token;
+                App.currentUser = res.user;
+                localStorage.setItem('sissiman-token', res.token);
+                localStorage.setItem('sissiman-user', JSON.stringify(res.user));
+            } catch (err) {
+                errorEl.textContent = err.status === 401 ? 'Identifiant ou mot de passe incorrect'
+                    : err.status ? err.message : 'Impossible de joindre le serveur';
                 return false;
+            } finally {
+                btn.disabled = false;
             }
-            App.currentUser = { id: user.id, name: user.name, role: user.role };
-            localStorage.setItem('sissiman-user', JSON.stringify(App.currentUser));
             document.getElementById('loginScreen').classList.add('hidden');
             App.loginBg.stop();
             document.getElementById('loginUser').value = '';
             document.getElementById('loginPass').value = '';
-            document.getElementById('loginError').textContent = '';
-            App.loadData();
-            App.setupNav();
-            App.startClock();
-            App.setupUserMenu();
-            App.setupSidebar();
-            App.setupIconPicker();
-            App.setupModals();
-            App.setupKeyboard();
-            App.seedDefaults();
-            App.render();
+            App.start();
             return false;
         },
 
-        logout() {
+        clearSession() {
+            App.sync.reset();
             App.currentUser = null;
+            App.token = null;
+            App.staff = [];
             localStorage.removeItem('sissiman-user');
+            localStorage.removeItem('sissiman-token');
+        },
+
+        showLogin() {
             document.getElementById('loginScreen').classList.remove('hidden');
             document.getElementById('userDropdown').classList.remove('open');
             App.loginBg.start();
+        },
+
+        logout() {
+            if (App.token) App.api('/logout', { method: 'POST' }).catch(() => {});
+            this.clearSession();
+            this.showLogin();
+        },
+
+        expire() {
+            if (!App.currentUser) return;
+            this.clearSession();
+            this.showLogin();
+            App.toast('Session expiree, reconnectez-vous', 'error');
         }
     },
 
@@ -295,10 +465,6 @@ const App = {
         const avatar = document.getElementById('userAvatar');
         const dropdown = document.getElementById('userDropdown');
         if (!avatar) return;
-
-        const initials = this.currentUser ? this.currentUser.name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) : '--';
-        document.getElementById('userInitials').textContent = initials;
-        document.getElementById('dropdownUserName').textContent = this.currentUser ? this.currentUser.name : '';
 
         avatar.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -354,7 +520,15 @@ const App = {
         });
     },
 
+    renderUser() {
+        const name = this.currentUser ? this.currentUser.name : '';
+        const initials = name ? name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) : '--';
+        document.getElementById('userInitials').textContent = initials;
+        document.getElementById('dropdownUserName').textContent = name;
+    },
+
     render() {
+        this.renderUser();
         this.applyPermissions();
         this.dashboard.render();
         this.tables.render();
@@ -711,16 +885,29 @@ const App = {
             document.getElementById('orderTotal').textContent = App.fmt(total);
         },
 
-        submitOrder() {
+        async submitOrder() {
             if (this.currentItems.length === 0) { App.toast('Ajoutez au moins un article', 'error'); return; }
+            if (this.submitting) return;
             const tableId = document.getElementById('orderTable').value;
             const covers = parseInt(document.getElementById('orderCovers').value) || 1;
             const note = document.getElementById('orderNote').value;
             const total = this.currentItems.reduce((s, it) => s + it.price * it.qty, 0);
 
+            let number;
+            this.submitting = true;
+            try {
+                const maxLocal = App.data.orders.reduce((m, o) => Math.max(m, o.number || 0), 0);
+                number = (await App.api('/orders/next-number', { method: 'POST', body: { min: maxLocal + 1 } })).number;
+            } catch (e) {
+                App.toast('Connexion impossible : commande non enregistree', 'error');
+                return;
+            } finally {
+                this.submitting = false;
+            }
+
             const order = {
                 id: App.genId(),
-                number: App.data.nextOrderId++,
+                number,
                 tableId,
                 covers,
                 items: [...this.currentItems],
@@ -1049,16 +1236,14 @@ const App = {
             document.getElementById('cuisineEnCours').textContent = enCours.length;
             document.getElementById('cuisinePretes').textContent = pretes.length;
 
+            if (enCours.length > this._lastCount) this.playNotif();
+            this._lastCount = enCours.length;
+
             const grid = document.getElementById('cuisineGrid');
             if (orders.length === 0) {
                 grid.innerHTML = '<p class="empty-state">Aucune commande en attente</p>';
                 return;
             }
-
-            if (enCours.length > this._lastCount && this._lastCount >= 0) {
-                this.playNotif();
-            }
-            this._lastCount = enCours.length;
 
             const now = Date.now();
             grid.innerHTML = orders.map(o => {
@@ -1286,7 +1471,7 @@ const App = {
                     </div>
                     ${isGerant ? `<div class="personnel-actions">
                         <button class="btn btn-small btn-secondary" onclick="App.personnel.edit(${s.id})">Modifier</button>
-                        ${s.id !== 1 ? `<button class="btn btn-small btn-danger" onclick="App.personnel.remove(${s.id})">Supprimer</button>` : ''}
+                        ${s.id !== 1 && s.id !== App.currentUser.id ? `<button class="btn btn-small btn-danger" onclick="App.personnel.remove(${s.id})">Supprimer</button>` : ''}
                     </div>` : ''}
                 </div>`;
             }).join('');
@@ -1298,6 +1483,7 @@ const App = {
             document.getElementById('staffName').value = '';
             document.getElementById('staffUsername').value = '';
             document.getElementById('staffPassword').value = '';
+            document.getElementById('staffPassword').placeholder = 'Mot de passe (6 caracteres min.)';
             document.getElementById('staffRole').value = 'serveur';
             document.getElementById('modalPersonnel').classList.add('open');
         },
@@ -1309,7 +1495,8 @@ const App = {
             document.getElementById('modalPersonnelTitle').textContent = 'Modifier le membre';
             document.getElementById('staffName').value = s.name;
             document.getElementById('staffUsername').value = s.username;
-            document.getElementById('staffPassword').value = s.password;
+            document.getElementById('staffPassword').value = '';
+            document.getElementById('staffPassword').placeholder = 'Laisser vide pour ne pas changer';
             document.getElementById('staffRole').value = s.role;
             document.getElementById('modalPersonnel').classList.add('open');
         },
@@ -1318,36 +1505,44 @@ const App = {
             document.getElementById('modalPersonnel').classList.remove('open');
         },
 
-        save() {
+        async save() {
             const name = document.getElementById('staffName').value.trim();
             const username = document.getElementById('staffUsername').value.trim();
             const password = document.getElementById('staffPassword').value;
             const role = document.getElementById('staffRole').value;
 
-            if (!name || !username || !password) { App.toast('Remplissez tous les champs', 'error'); return; }
+            if (!name || !username || (!this.editingId && !password)) { App.toast('Remplissez tous les champs', 'error'); return; }
 
-            const list = App.staff;
-            const dup = list.find(s => s.username === username && s.id !== this.editingId);
-            if (dup) { App.toast('Cet identifiant existe deja', 'error'); return; }
-
-            if (this.editingId) {
-                const s = list.find(x => x.id === this.editingId);
-                if (s) { s.name = name; s.username = username; s.password = password; s.role = role; }
-                App.toast('Membre modifie');
-            } else {
-                const maxId = list.reduce((m, s) => Math.max(m, s.id), 0);
-                list.push({ id: maxId + 1, username, password, name, role });
-                App.toast('Membre ajoute');
+            try {
+                if (this.editingId) {
+                    const res = await App.api('/staff/' + this.editingId, { method: 'PUT', body: { name, username, password, role } });
+                    if (res.staff.id === App.currentUser.id) {
+                        App.currentUser = res.staff;
+                        localStorage.setItem('sissiman-user', JSON.stringify(res.staff));
+                    }
+                    App.toast('Membre modifie');
+                } else {
+                    await App.api('/staff', { method: 'POST', body: { name, username, password, role } });
+                    App.toast('Membre ajoute');
+                }
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible', 'error');
+                return;
             }
-            App.staff = list;
+            await App.loadStaff();
             this.closeModal();
             App.render();
         },
 
-        remove(id) {
+        async remove(id) {
             if (!confirm('Supprimer ce membre ?')) return;
-            const list = App.staff.filter(s => s.id !== id);
-            App.staff = list;
+            try {
+                await App.api('/staff/' + id, { method: 'DELETE' });
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible', 'error');
+                return;
+            }
+            await App.loadStaff();
             App.toast('Membre supprime');
             App.render();
         }

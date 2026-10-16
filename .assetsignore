@@ -1,0 +1,9 @@
+.git
+.gitignore
+.assetsignore
+.wrangler
+node_modules
+src
+wrangler.toml
+schema.sql
+server.js
