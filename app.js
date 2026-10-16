@@ -772,56 +772,446 @@ const App = {
 
     // DASHBOARD
     dashboard: {
+        tips: {},
+        timer: null,
+        KITCHEN_LATE_MIN: 20,
+        BILL_LATE_MIN: 45,
+        CASH_OPEN_MAX_H: 14,
+
+        dayKey(d) {
+            const x = new Date(d);
+            return x.getFullYear() + '-' + (x.getMonth() + 1) + '-' + x.getDate();
+        },
+
+        // Revenue = value of orders taken (not cancelled); cash = money actually collected, net of refunds.
+        stats(from, to) {
+            const inRange = iso => { const t = new Date(iso).getTime(); return t >= from && t < to; };
+            const orders = App.data.orders.filter(o => inRange(o.createdAt));
+            const valid = orders.filter(o => o.status !== 'annulee');
+            const cash = App.data.payments.filter(p => inRange(p.paidAt)).reduce((s, p) => s + p.amount, 0)
+                - App.data.refunds.filter(r => inRange(r.at)).reduce((s, r) => s + r.amount, 0);
+            return {
+                revenue: valid.reduce((s, o) => s + o.total, 0),
+                cash,
+                count: valid.length,
+                cancelled: orders.length - valid.length
+            };
+        },
+
+        startOfDay(offsetDays = 0) {
+            const d = new Date();
+            d.setHours(0, 0, 0, 0);
+            d.setDate(d.getDate() + offsetDays);
+            return d.getTime();
+        },
+
+        compact(n) {
+            const a = Math.abs(n);
+            if (a >= 1e6) return (n / 1e6).toFixed(a >= 1e7 ? 0 : 1).replace('.0', '').replace('.', ',') + ' M';
+            if (a >= 1e3) return (n / 1e3).toFixed(a >= 1e4 ? 0 : 1).replace('.0', '').replace('.', ',') + ' k';
+            return String(n);
+        },
+
+        delta(now, before) {
+            if (!before) return '';
+            const pct = Math.round((now - before) / before * 100);
+            const cls = pct > 0 ? 'up' : pct < 0 ? 'down' : 'flat';
+            const arrow = pct > 0 ? '▲' : pct < 0 ? '▼' : '=';
+            return `<span class="kpi-delta ${cls}">${arrow} ${pct > 0 ? '+' : ''}${pct} % <span>vs hier a la meme heure</span></span>`;
+        },
+
         render() {
-            const orders = App.todayOrders();
-            const paid = orders.filter(o => o.status === 'payee');
-            const today = new Date().toDateString();
-            const revenue = App.data.payments.filter(p => new Date(p.paidAt).toDateString() === today).reduce((s, p) => s + p.amount, 0)
-                - App.data.refunds.filter(r => new Date(r.at).toDateString() === today).reduce((s, r) => s + r.amount, 0);
-            const covers = paid.reduce((s, o) => s + (o.covers || 1), 0);
+            const page = document.getElementById('page-dashboard');
+            if (!page) return;
+            const now = Date.now();
+            const today = this.startOfDay(0);
+            const t = this.stats(today, now + 1);
+            const y = this.stats(this.startOfDay(-1), now - 86400000 + 1);
+
+            document.getElementById('dashDate').textContent = new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+
+            const unpaid = App.data.orders.filter(o => ['en_cours', 'prete', 'servie'].includes(o.status) && App.balance(o).remaining > 0);
+            const toCollect = unpaid.reduce((s, o) => s + App.balance(o).remaining, 0);
+            const avg = t.count ? Math.round(t.revenue / t.count) : 0;
+            const cashPct = t.revenue ? Math.round(t.cash / t.revenue * 100) : null;
+
+            document.getElementById('dashKpis').innerHTML = `
+                <div class="kpi kpi-hero">
+                    <span class="kpi-label">Chiffre d'affaires</span>
+                    <span class="kpi-value">${App.fmt(t.revenue)}</span>
+                    ${this.delta(t.revenue, y.revenue)}
+                    <span class="kpi-sub">Valeur des commandes prises (hors annulations)</span>
+                </div>
+                <div class="kpi">
+                    <span class="kpi-label">Encaisse</span>
+                    <span class="kpi-value">${App.fmt(t.cash)}</span>
+                    ${this.delta(t.cash, y.cash)}
+                    <span class="kpi-sub">${cashPct === null ? 'Argent recu, net des remboursements' : `${cashPct} % du chiffre d'affaires`}</span>
+                </div>
+                <div class="kpi">
+                    <span class="kpi-label">Commandes</span>
+                    <span class="kpi-value">${t.count}</span>
+                    ${this.delta(t.count, y.count)}
+                    <span class="kpi-sub">Panier moyen ${App.fmt(avg)}${t.cancelled ? ` · ${t.cancelled} annulee(s)` : ''}</span>
+                </div>
+                <div class="kpi">
+                    <span class="kpi-label">Reste a encaisser</span>
+                    <span class="kpi-value">${App.fmt(toCollect)}</span>
+                    <span class="kpi-sub">${unpaid.length} commande(s) non soldee(s)</span>
+                </div>`;
+
+            this.renderActivity(unpaid);
+            this.renderAlerts(now);
+            this.renderRecent();
+
+            if (!page.classList.contains('active')) return;
+            this.tips = {};
+            this.renderWeek();
+            this.renderHours(today, now);
+            this.renderTop(today, now);
+            this.renderMethods(today, now);
+            this.ensureTimer();
+        },
+
+        ensureTimer() {
+            if (this.timer) return;
+            // Waiting times in the alerts move with the clock, not only with data changes.
+            this.timer = setInterval(() => {
+                if (document.getElementById('page-dashboard').classList.contains('active') && App.currentUser) this.render();
+            }, 60000);
+            let resizeT;
+            window.addEventListener('resize', () => {
+                clearTimeout(resizeT);
+                resizeT = setTimeout(() => {
+                    if (document.getElementById('page-dashboard').classList.contains('active')) this.render();
+                }, 200);
+            });
+            const page = document.getElementById('page-dashboard');
+            const show = e => {
+                const el = e.target.closest('[data-tip]');
+                if (!el || !page.contains(el)) return;
+                this.showTip(el, e.type === 'focusin');
+            };
+            page.addEventListener('pointermove', show);
+            page.addEventListener('focusin', show);
+            page.addEventListener('pointerleave', () => this.hideTip());
+            page.addEventListener('pointerout', e => { if (!e.relatedTarget || !e.relatedTarget.closest || !e.relatedTarget.closest('[data-tip]')) this.hideTip(); });
+            page.addEventListener('focusout', () => this.hideTip());
+        },
+
+        renderActivity(unpaid) {
+            const count = s => App.data.orders.filter(o => o.status === s).length;
+            const servedUnpaid = unpaid.filter(o => o.status === 'servie').length;
             const occupied = App.data.tables.filter(t => t.status === 'occupee').length;
+            const tile = (label, value, sub, page) => {
+                const clickable = App.can('page.' + page);
+                return `<${clickable ? 'button' : 'div'} class="activity-tile" ${clickable ? `onclick="App.navigateTo('${page}')"` : ''}>
+                    <span class="activity-value">${value}</span>
+                    <span class="activity-label">${label}</span>
+                    <span class="activity-sub">${sub}</span>
+                </${clickable ? 'button' : 'div'}>`;
+            };
+            document.getElementById('dashActivity').innerHTML =
+                tile('En preparation', count('en_cours'), 'Commandes en cuisine', 'cuisine') +
+                tile('Pretes a servir', count('prete'), 'En attente du serveur', 'cuisine') +
+                tile('Servies non reglees', servedUnpaid, "Addition a encaisser", 'caisse') +
+                tile('Tables occupees', `${occupied}<small> / ${App.data.tables.length}</small>`, 'Taux ' + (App.data.tables.length ? Math.round(occupied / App.data.tables.length * 100) : 0) + ' %', 'tables');
+        },
 
-            document.getElementById('statClients').textContent = covers;
-            document.getElementById('statRevenue').textContent = App.fmt(revenue);
-            document.getElementById('statOrders').textContent = orders.length;
-            document.getElementById('statTables').textContent = `${occupied} / ${App.data.tables.length}`;
+        renderAlerts(now) {
+            const alerts = [];
+            const mins = iso => Math.floor((now - new Date(iso).getTime()) / 60000);
+            const num = o => '#' + String(o.number).padStart(3, '0');
+            const tableOf = o => { const t = App.data.tables.find(x => x.id === o.tableId); return t ? 'table ' + t.number : 'sans table'; };
 
+            const late = App.data.orders.filter(o => o.status === 'en_cours' && mins(o.createdAt) >= this.KITCHEN_LATE_MIN)
+                .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+            if (late.length) alerts.push({
+                level: 'critical', page: 'cuisine',
+                title: `${late.length} commande(s) en cuisine depuis plus de ${this.KITCHEN_LATE_MIN} min`,
+                detail: late.slice(0, 4).map(o => `${num(o)} ${tableOf(o)} · ${mins(o.createdAt)} min`).join(' — ')
+            });
+
+            const bills = App.data.orders.filter(o => o.status === 'servie' && App.balance(o).remaining > 0 && mins(o.createdAt) >= this.BILL_LATE_MIN);
+            if (bills.length) alerts.push({
+                level: 'warning', page: 'caisse',
+                title: `${bills.length} addition(s) servie(s) non reglee(s) depuis plus de ${this.BILL_LATE_MIN} min`,
+                detail: bills.slice(0, 4).map(o => `${num(o)} ${tableOf(o)} · reste ${App.fmt(App.balance(o).remaining)}`).join(' — ')
+            });
+
+            const gaps = App.data.cashSessions.filter(s => s.status === 'fermee' && s.diff && now - new Date(s.closedAt).getTime() < 7 * 86400000)
+                .sort((a, b) => b.closedAt.localeCompare(a.closedAt));
+            if (gaps.length && App.can('cash.history')) alerts.push({
+                level: gaps.some(s => s.diff < 0) ? 'critical' : 'serious', page: 'caisse',
+                title: `${gaps.length} ecart(s) de caisse sur les 7 derniers jours`,
+                detail: gaps.slice(0, 3).map(s => `${s.staffName} le ${new Date(s.closedAt).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })} : ${s.diff > 0 ? '+' : ''}${App.fmt(s.diff)}`).join(' — ')
+            });
+
+            const stale = App.data.cashSessions.filter(s => s.status === 'ouverte' && now - new Date(s.openedAt).getTime() > this.CASH_OPEN_MAX_H * 3600000);
+            if (stale.length) alerts.push({
+                level: 'serious', page: 'caisse',
+                title: `${stale.length} caisse(s) ouverte(s) depuis plus de ${this.CASH_OPEN_MAX_H} h`,
+                detail: stale.map(s => `${s.staffName}, ouverte le ${new Date(s.openedAt).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`).join(' — ')
+            });
+
+            const off = App.data.menuItems.filter(m => m.available === false);
+            if (off.length) alerts.push({
+                level: 'warning', page: 'menu',
+                title: `${off.length} plat(s) indisponible(s)`,
+                detail: off.slice(0, 6).map(m => m.name).join(', ') + (off.length > 6 ? '…' : '')
+            });
+
+            const icons = {
+                critical: '<path d="M12 9v4m0 4h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/>',
+                serious: '<circle cx="12" cy="12" r="9"/><path d="M12 8v4m0 4h.01"/>',
+                warning: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+                good: '<circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/>'
+            };
+            const labels = { critical: 'Urgent', serious: 'Important', warning: 'A surveiller', good: 'Tout va bien' };
+            const el = document.getElementById('dashAlerts');
+            if (!alerts.length) {
+                el.innerHTML = `<div class="alert-row good"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">${icons.good}</svg>
+                    <div><span class="alert-level">${labels.good}</span><strong>Aucune alerte</strong><span class="alert-detail">Cuisine a l'heure, caisses justes, menu complet.</span></div></div>`;
+                return;
+            }
+            el.innerHTML = alerts.map(a => {
+                const clickable = App.can('page.' + a.page);
+                return `<${clickable ? 'button' : 'div'} class="alert-row ${a.level}" ${clickable ? `onclick="App.navigateTo('${a.page}')"` : ''}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">${icons[a.level]}</svg>
+                    <div><span class="alert-level">${labels[a.level]}</span><strong>${App.esc(a.title)}</strong><span class="alert-detail">${App.esc(a.detail)}</span></div>
+                </${clickable ? 'button' : 'div'}>`;
+            }).join('');
+        },
+
+        renderRecent() {
             const recentEl = document.getElementById('recentOrders');
-            const recent = orders.slice(-5).reverse();
+            const recent = App.todayOrders().slice(-6).reverse();
             if (recent.length === 0) {
                 recentEl.innerHTML = '<p class="empty-state">Aucune commande aujourd\'hui</p>';
-            } else {
-                recentEl.innerHTML = recent.map(o => {
-                    const table = App.data.tables.find(t => t.id === o.tableId);
-                    const time = new Date(o.createdAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-                    return `<div class="recent-order-row">
-                        <span class="time">${App.esc(time)}</span>
-                        <span class="details">Table ${table ? table.number : '?'} - ${o.items.length} article(s)</span>
-                        <span class="order-status ${App.esc(o.status)}">${App.esc(o.status.replace('_', ' '))}</span>
-                        <span class="amount">${App.fmt(o.total)}</span>
-                    </div>`;
-                }).join('');
+                return;
             }
+            recentEl.innerHTML = recent.map(o => {
+                const table = App.data.tables.find(t => t.id === o.tableId);
+                const time = new Date(o.createdAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+                return `<div class="recent-order-row">
+                    <span class="time">${App.esc(time)}</span>
+                    <span class="details">#${String(o.number).padStart(3, '0')} · Table ${table ? table.number : '?'} - ${o.items.length} article(s)</span>
+                    <span class="order-status ${App.esc(o.status)}">${App.esc(o.status.replace('_', ' '))}</span>
+                    <span class="amount">${App.fmt(o.total)}</span>
+                </div>`;
+            }).join('');
+        },
 
-            const popEl = document.getElementById('popularDishes');
-            const itemCounts = {};
-            orders.forEach(o => {
-                o.items.forEach(it => {
-                    itemCounts[it.name] = (itemCounts[it.name] || 0) + it.qty;
+        // ---- charts ----
+
+        // Round tick step (1/2/5 × 10^n) so every gridline lands on a clean amount.
+        niceScale(v) {
+            const raw = Math.max(v, 1000) / 4;
+            const p = Math.pow(10, Math.floor(Math.log10(raw)));
+            const n = raw / p;
+            const step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * p;
+            const max = step * Math.max(1, Math.ceil(v / step));
+            const ticks = [];
+            for (let t = 0; t <= max + step / 2; t += step) ticks.push(t);
+            return { max, ticks };
+        },
+
+        tipKey(title, rows) {
+            const key = 't' + Object.keys(this.tips).length;
+            this.tips[key] = { title, rows };
+            return key;
+        },
+
+        // Rounded data-end, square at the baseline.
+        barPath(x, y, w, h) {
+            if (h <= 0) return '';
+            const r = Math.min(4, w / 2, h);
+            return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+        },
+
+        columns(el, { groups, series, height = 210, highlightMax = false }) {
+            const width = Math.max(260, el.clientWidth || 0);
+            const m = { top: 18, right: 8, bottom: 26, left: 44 };
+            const pw = width - m.left - m.right, ph = height - m.top - m.bottom;
+            const labelEvery = Math.max(1, Math.ceil(groups.length * 48 / pw));
+            const { max, ticks } = this.niceScale(Math.max(0, ...groups.flatMap(g => g.values)));
+            const band = pw / groups.length;
+            const barW = Math.max(3, Math.min(24, (band * 0.7 - 2 * (series.length - 1)) / series.length));
+            const groupW = barW * series.length + 2 * (series.length - 1);
+            const yOf = v => m.top + ph - (v / max) * ph;
+            let svg = `<svg class="viz" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${App.esc(series.map(s => s.name).join(' et '))}">`;
+            svg += ticks.map(v => `<line class="viz-grid${v === 0 ? ' base' : ''}" x1="${m.left}" x2="${width - m.right}" y1="${yOf(v)}" y2="${yOf(v)}"/>
+                <text class="viz-axis" x="${m.left - 6}" y="${yOf(v) + 4}" text-anchor="end">${this.compact(v)}</text>`).join('');
+            let maxInfo = null;
+            groups.forEach((g, i) => {
+                const gx = m.left + band * i + (band - groupW) / 2;
+                g.values.forEach((v, si) => {
+                    const h = (v / max) * ph;
+                    svg += `<path class="viz-bar s${si + 1}" d="${this.barPath(gx + si * (barW + 2), yOf(v), barW, h)}"/>`;
+                    if (highlightMax && (!maxInfo || v > maxInfo.v)) maxInfo = { v, x: gx + barW / 2, y: yOf(v) };
                 });
+                if (i % labelEvery === 0) {
+                    svg += `<text class="viz-axis" x="${m.left + band * i + band / 2}" y="${height - 8}" text-anchor="middle">${App.esc(g.label)}</text>`;
+                }
+                const key = this.tipKey(g.title || g.label, series.map((s, si) => ({ name: s.name, value: App.fmt(g.values[si]), cls: 's' + (si + 1) })));
+                svg += `<rect class="viz-hit" x="${m.left + band * i}" y="${m.top}" width="${band}" height="${ph}" data-tip="${key}" tabindex="0"
+                    aria-label="${App.esc((g.title || g.label) + ' : ' + series.map((s, si) => s.name + ' ' + App.fmt(g.values[si])).join(', '))}"/>`;
             });
-            const popular = Object.entries(itemCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
-            if (popular.length === 0) {
-                popEl.innerHTML = '<p class="empty-state">Aucune donnee disponible</p>';
-            } else {
-                popEl.innerHTML = popular.map(([name, count], i) => `
-                    <div class="popular-row">
-                        <span class="popular-rank">${i + 1}</span>
-                        <span class="name">${App.esc(name)}</span>
-                        <span class="count">${count} commande(s)</span>
-                    </div>
-                `).join('');
+            if (maxInfo && maxInfo.v > 0) {
+                svg += `<text class="viz-label" x="${maxInfo.x}" y="${maxInfo.y - 6}" text-anchor="middle">${this.compact(maxInfo.v)}</text>`;
             }
+            return svg + '</svg>';
+        },
+
+        table(headers, rows) {
+            return `<table class="data-table viz-table"><thead><tr>${headers.map(h => `<th>${App.esc(h)}</th>`).join('')}</tr></thead>
+                <tbody>${rows.map(r => `<tr>${r.map(c => `<td>${App.esc(String(c))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+        },
+
+        fill(el, chartHtml, tableHtml) {
+            const showTable = el.closest('.chart-card').classList.contains('show-table');
+            el.innerHTML = `<div class="viz-chart"${showTable ? ' hidden' : ''}>${chartHtml}</div><div class="viz-table-wrap"${showTable ? '' : ' hidden'}>${tableHtml}</div>`;
+        },
+
+        toggleTable(btn) {
+            const card = btn.closest('.chart-card');
+            const on = card.classList.toggle('show-table');
+            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            btn.textContent = on ? 'Graphique' : 'Tableau';
+            card.querySelector('.viz-chart').hidden = on;
+            card.querySelector('.viz-table-wrap').hidden = !on;
+        },
+
+        renderWeek() {
+            const el = document.getElementById('chartWeek');
+            const groups = [];
+            for (let i = 6; i >= 0; i--) {
+                const from = this.startOfDay(-i), to = this.startOfDay(-i + 1);
+                const s = this.stats(from, to);
+                const d = new Date(from);
+                groups.push({
+                    label: i === 0 ? "Auj." : d.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '') + ' ' + d.getDate(),
+                    title: d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }),
+                    values: [s.revenue, s.cash]
+                });
+            }
+            const series = [{ name: "Chiffre d'affaires" }, { name: 'Encaisse' }];
+            document.getElementById('weekLegend').innerHTML = series.map((s, i) =>
+                `<span class="legend-item"><span class="legend-swatch s${i + 1}"></span>${App.esc(s.name)}</span>`).join('');
+            if (groups.every(g => g.values.every(v => v === 0))) {
+                el.innerHTML = '<p class="empty-state">Aucune vente sur les 7 derniers jours</p>';
+                return;
+            }
+            this.fill(el, this.columns(el, { groups, series }),
+                this.table(['Jour', "Chiffre d'affaires", 'Encaisse'], groups.map(g => [g.title, App.fmt(g.values[0]), App.fmt(g.values[1])])));
+        },
+
+        renderHours(today, now) {
+            const el = document.getElementById('chartHours');
+            const orders = App.data.orders.filter(o => o.status !== 'annulee' && new Date(o.createdAt).getTime() >= today);
+            if (!orders.length) {
+                el.innerHTML = '<p class="empty-state">Aucune commande aujourd\'hui</p>';
+                return;
+            }
+            const byHour = {};
+            orders.forEach(o => { const h = new Date(o.createdAt).getHours(); byHour[h] = (byHour[h] || 0) + o.total; });
+            const hours = Object.keys(byHour).map(Number);
+            const first = Math.min(8, ...hours), last = Math.max(22, ...hours);
+            const groups = [];
+            for (let h = first; h <= last; h++) groups.push({ label: h + 'h', title: `${h}h – ${h + 1}h`, values: [byHour[h] || 0] });
+            this.fill(el, this.columns(el, { groups, series: [{ name: "Chiffre d'affaires" }], highlightMax: true }),
+                this.table(['Heure', "Chiffre d'affaires"], groups.filter(g => g.values[0]).map(g => [g.title, App.fmt(g.values[0])])));
+        },
+
+        hbars(rows) {
+            const max = Math.max(1, ...rows.map(r => r.value));
+            return `<div class="hbars">${rows.map(r => {
+                const key = this.tipKey(r.label, r.tip);
+                return `<div class="hbar-row" data-tip="${key}" tabindex="0" aria-label="${App.esc(r.label + ' : ' + r.display)}">
+                    <span class="hbar-label">${App.esc(r.label)}</span>
+                    <span class="hbar-track"><span class="hbar-fill" style="width:${Math.max(1.5, r.value / max * 100)}%"></span></span>
+                    <span class="hbar-value">${App.esc(r.display)}</span>
+                </div>`;
+            }).join('')}</div>`;
+        },
+
+        renderTop(today, now) {
+            const el = document.getElementById('chartTopToday');
+            const agg = {};
+            App.data.orders.filter(o => o.status !== 'annulee' && new Date(o.createdAt).getTime() >= today).forEach(o => o.items.forEach(it => {
+                const a = agg[it.name] || (agg[it.name] = { qty: 0, amount: 0 });
+                a.qty += it.qty;
+                a.amount += it.qty * it.price;
+            }));
+            const top = Object.entries(agg).sort((a, b) => b[1].qty - a[1].qty || b[1].amount - a[1].amount).slice(0, 6);
+            if (!top.length) {
+                el.innerHTML = '<p class="empty-state">Aucun plat vendu aujourd\'hui</p>';
+                return;
+            }
+            this.fill(el, this.hbars(top.map(([name, a]) => ({
+                label: name, value: a.qty, display: String(a.qty),
+                tip: [{ name: 'Quantite', value: String(a.qty), cls: 's1' }, { name: "Chiffre d'affaires", value: App.fmt(a.amount) }]
+            }))), this.table(['Plat', 'Quantite', "Chiffre d'affaires"], top.map(([n, a]) => [n, a.qty, App.fmt(a.amount)])));
+        },
+
+        renderMethods(today, now) {
+            const el = document.getElementById('chartMethods');
+            const by = { especes: 0, mobile: 0, carte: 0 };
+            App.data.payments.filter(p => new Date(p.paidAt).getTime() >= today).forEach(p => { by[p.method] = (by[p.method] || 0) + p.amount; });
+            App.data.refunds.filter(r => new Date(r.at).getTime() >= today).forEach(r => { by[r.method] = (by[r.method] || 0) - r.amount; });
+            const total = Object.values(by).reduce((s, v) => s + v, 0);
+            if (total <= 0) {
+                el.innerHTML = '<p class="empty-state">Aucun encaissement aujourd\'hui</p>';
+                return;
+            }
+            const rows = Object.entries(by).map(([m, v]) => ({
+                label: App.methodLabel(m), value: Math.max(0, v),
+                display: `${App.fmt(v)} · ${Math.round(v / total * 100)} %`,
+                tip: [{ name: 'Montant net', value: App.fmt(v), cls: 's1' }, { name: 'Part', value: Math.round(v / total * 100) + ' %' }]
+            }));
+            this.fill(el, this.hbars(rows), this.table(['Moyen de paiement', 'Montant net', 'Part'], rows.map(r => [r.label, App.fmt(r.value), Math.round(r.value / total * 100) + ' %'])));
+        },
+
+        showTip(el, fromFocus) {
+            const data = this.tips[el.dataset.tip];
+            const tip = document.getElementById('vizTip');
+            if (!data) return;
+            el.classList.add('is-hover');
+            if (this.hoverEl && this.hoverEl !== el) this.hoverEl.classList.remove('is-hover');
+            this.hoverEl = el;
+            tip.replaceChildren();
+            const title = document.createElement('div');
+            title.className = 'viz-tip-title';
+            title.textContent = data.title;
+            tip.appendChild(title);
+            data.rows.forEach(r => {
+                const row = document.createElement('div');
+                row.className = 'viz-tip-row';
+                const key = document.createElement('span');
+                key.className = 'viz-tip-key ' + (r.cls || 'none');
+                const value = document.createElement('strong');
+                value.textContent = r.value;
+                const name = document.createElement('span');
+                name.textContent = r.name;
+                row.append(key, value, name);
+                tip.appendChild(row);
+            });
+            tip.hidden = false;
+            const box = el.getBoundingClientRect();
+            const tw = tip.offsetWidth, th = tip.offsetHeight;
+            let x = box.left + box.width / 2 - tw / 2;
+            x = Math.max(8, Math.min(window.innerWidth - tw - 8, x));
+            let y = box.top - th - 8;
+            if (y < 8) y = box.bottom + 8;
+            tip.style.left = x + 'px';
+            tip.style.top = y + 'px';
+        },
+
+        hideTip() {
+            const tip = document.getElementById('vizTip');
+            if (tip) tip.hidden = true;
+            if (this.hoverEl) this.hoverEl.classList.remove('is-hover');
+            this.hoverEl = null;
         }
     },
 
