@@ -4,7 +4,9 @@ const App = {
         categories: [],
         menuItems: [],
         orders: [],
-        payments: []
+        payments: [],
+        refunds: [],
+        cashSessions: []
     },
 
     staff: [],
@@ -69,6 +71,36 @@ const App = {
         return data;
     },
 
+    // POSTs a server-side operation and applies the records it returns, so the screen updates without waiting for the next sync.
+    async serverAction(path, body) {
+        const res = await this.api(path, { method: 'POST', body });
+        if (res.records && res.records.length) {
+            this.sync.apply(res.records);
+            this.cacheData();
+        }
+        this.render();
+        return res;
+    },
+
+    balance(o) {
+        const paid = o.paid || 0;
+        return { paid, refunded: o.refunded || 0, remaining: Math.max(0, o.total - paid) };
+    },
+
+    refundedOf(paymentId) {
+        return this.data.refunds.filter(r => r.paymentId === paymentId).reduce((s, r) => s + r.amount, 0);
+    },
+
+    methodLabel(m) {
+        return { especes: 'Especes', mobile: 'Mobile Money', carte: 'Carte' }[m] || this.esc(m || '');
+    },
+
+    myCashSession() {
+        return this.currentUser
+            ? this.data.cashSessions.find(s => s.status === 'ouverte' && s.staffId === this.currentUser.id)
+            : null;
+    },
+
     async loadStaff() {
         try {
             this.staff = (await this.api('/staff')).staff;
@@ -76,7 +108,7 @@ const App = {
     },
 
     sync: {
-        COLLECTIONS: ['tables', 'categories', 'menuItems', 'orders', 'payments'],
+        COLLECTIONS: ['tables', 'categories', 'menuItems', 'orders', 'payments', 'refunds', 'cashSessions'],
         synced: {},
         since: 0,
         ready: false,
@@ -699,7 +731,10 @@ const App = {
         'orders.ready': ['gerant', 'cuisinier', 'serveur'],
         'orders.serve': ['gerant', 'caissier', 'serveur'],
         'orders.cancel': ['gerant', 'caissier'],
-        'payments.create': ['gerant', 'caissier']
+        'payments.create': ['gerant', 'caissier'],
+        'cash.session': ['gerant', 'caissier'],
+        'cash.history': ['gerant'],
+        'refunds.create': ['gerant']
     },
 
     can(perm) {
@@ -740,7 +775,9 @@ const App = {
         render() {
             const orders = App.todayOrders();
             const paid = orders.filter(o => o.status === 'payee');
-            const revenue = paid.reduce((s, o) => s + o.total, 0);
+            const today = new Date().toDateString();
+            const revenue = App.data.payments.filter(p => new Date(p.paidAt).toDateString() === today).reduce((s, p) => s + p.amount, 0)
+                - App.data.refunds.filter(r => new Date(r.at).toDateString() === today).reduce((s, r) => s + r.amount, 0);
             const covers = paid.reduce((s, o) => s + (o.covers || 1), 0);
             const occupied = App.data.tables.filter(t => t.status === 'occupee').length;
 
@@ -1245,53 +1282,75 @@ const App = {
     // CAISSE
     caisse: {
         selectedOrderId: null,
-        paymentMethod: 'especes',
+        lines: [],
+        pendingId: null,
+        busy: false,
+        refundPaymentId: null,
+        pendingRefundId: null,
+
+        payableOrders() {
+            return App.data.orders
+                .filter(o => ['en_cours', 'prete', 'servie'].includes(o.status) && App.balance(o).remaining > 0)
+                .sort((a, b) => a.number - b.number);
+        },
 
         render() {
-            const orders = App.data.orders.filter(o => o.status === 'servie' || o.status === 'prete');
+            App.cash.renderBar();
+            const orders = this.payableOrders();
             const today = new Date().toDateString();
             const todayPayments = App.data.payments.filter(p => new Date(p.paidAt).toDateString() === today);
-            const todayTotal = todayPayments.reduce((s, p) => s + p.amount, 0);
+            const todayRefunds = App.data.refunds.filter(r => new Date(r.at).toDateString() === today);
+            const net = todayPayments.reduce((s, p) => s + p.amount, 0) - todayRefunds.reduce((s, r) => s + r.amount, 0);
 
             document.getElementById('caissePending').textContent = orders.length;
-            document.getElementById('caisseTodayTotal').textContent = App.fmt(todayTotal);
+            document.getElementById('caisseTodayTotal').textContent = App.fmt(net);
             document.getElementById('caisseTodayCount').textContent = todayPayments.length;
 
             const container = document.getElementById('caisseOrders');
+            container.innerHTML = orders.length === 0 ? '<p class="empty-state">Aucune commande a encaisser</p>' : orders.map(o => {
+                const table = App.data.tables.find(t => t.id === o.tableId);
+                const b = App.balance(o);
+                return `<div class="caisse-order-card ${this.selectedOrderId === o.id ? 'selected' : ''}" onclick="App.caisse.selectOrder('${o.id}')">
+                    <div class="caisse-order-header">
+                        <strong>#${String(o.number).padStart(3, '0')} - Table ${table ? table.number : '?'}</strong>
+                        <strong>${App.fmt(o.total)}</strong>
+                    </div>
+                    <div class="caisse-order-items">${o.items.map(it => `${it.qty}x ${App.esc(it.name)}`).join(', ')}</div>
+                    ${b.paid > 0 ? `<div class="caisse-order-partial">Deja paye ${App.fmt(b.paid)} · Reste <strong>${App.fmt(b.remaining)}</strong></div>` : ''}
+                </div>`;
+            }).join('');
 
-            if (orders.length === 0) {
-                container.innerHTML = '<p class="empty-state">Aucune commande a encaisser</p>';
-            } else {
-                container.innerHTML = orders.map(o => {
-                    const table = App.data.tables.find(t => t.id === o.tableId);
-                    return `<div class="caisse-order-card ${this.selectedOrderId === o.id ? 'selected' : ''}" onclick="App.caisse.selectOrder('${o.id}')">
-                        <div class="caisse-order-header">
-                            <strong>#${String(o.number).padStart(3, '0')} - Table ${table ? table.number : '?'}</strong>
-                            <strong>${App.fmt(o.total)}</strong>
-                        </div>
-                        <div class="caisse-order-items">${o.items.map(it => `${it.qty}x ${App.esc(it.name)}`).join(', ')}</div>
-                    </div>`;
-                }).join('');
-            }
-
-            if (!this.selectedOrderId) {
+            const selected = App.data.orders.find(o => o.id === this.selectedOrderId);
+            if (!selected) {
+                this.selectedOrderId = null;
                 document.getElementById('caisseTicket').innerHTML = '<p class="empty-state">Selectionnez une commande</p>';
                 document.getElementById('caisseActions').style.display = 'none';
+            } else {
+                this.renderOrderState();
             }
 
-            this.renderPayments();
+            this.renderOperations();
+            App.cash.renderHistory();
         },
 
         selectOrder(id) {
-            this.selectedOrderId = id;
             const o = App.data.orders.find(x => x.id === id);
             if (!o) return;
-            const table = App.data.tables.find(t => t.id === o.tableId);
+            this.selectedOrderId = id;
+            this.pendingId = App.genId();
+            this.lines = [{ method: 'especes', amount: String(App.balance(o).remaining), received: '' }];
+            this.renderTicketPreview(o);
+            document.getElementById('caisseActions').style.display = 'block';
+            this.renderLines();
+            this.render();
+        },
 
+        renderTicketPreview(o) {
+            const table = App.data.tables.find(t => t.id === o.tableId);
             document.getElementById('caisseTicket').innerHTML = `
                 <div class="ticket-header">
                     <h3>Restaurant Sissiman</h3>
-                    <div>Ticket #${String(o.number).padStart(3, '0')}</div>
+                    <div>Commande #${String(o.number).padStart(3, '0')}</div>
                     <div>Table ${table ? table.number : '?'} - ${o.covers || 1} couvert(s)</div>
                     <div>${new Date(o.createdAt).toLocaleString('fr-FR')}</div>
                 </div>
@@ -1309,87 +1368,477 @@ const App = {
                 </div>
                 ${o.note ? `<div style="margin-top:0.5rem;font-size:0.8rem;color:var(--text-secondary)">Note: ${App.esc(o.note)}</div>` : ''}
             `;
-
-            document.getElementById('caisseActions').style.display = 'block';
-            document.getElementById('cashReceived').value = '';
-            document.getElementById('changeDisplay').textContent = 'Monnaie: 0 FCFA';
-            this.render();
         },
 
-        setPayment(method) {
-            this.paymentMethod = method;
-            document.querySelectorAll('.payment-btn').forEach(b => b.classList.toggle('active', b.dataset.method === method));
-            document.getElementById('cashSection').style.display = method === 'especes' ? 'block' : 'none';
-        },
-
-        calcChange() {
+        renderOrderState() {
             const o = App.data.orders.find(x => x.id === this.selectedOrderId);
             if (!o) return;
-            const received = parseInt(document.getElementById('cashReceived').value) || 0;
-            const change = Math.max(0, received - o.total);
-            document.getElementById('changeDisplay').textContent = `Monnaie: ${App.fmt(change)}`;
+            const b = App.balance(o);
+            document.getElementById('payBalance').innerHTML = `
+                <div><span>Total</span><strong>${App.fmt(o.total)}</strong></div>
+                <div><span>Deja paye</span><strong>${App.fmt(b.paid)}</strong></div>
+                ${b.refunded ? `<div><span>Rembourse</span><strong class="neg">-${App.fmt(b.refunded)}</strong></div>` : ''}
+                <div class="pay-rest ${b.remaining === 0 ? 'done' : ''}"><span>${b.remaining === 0 ? 'Commande soldee' : 'Reste a payer'}</span><strong>${App.fmt(b.remaining)}</strong></div>`;
+            document.getElementById('payForm').style.display = b.remaining > 0 && o.status !== 'annulee' && App.can('payments.create') ? '' : 'none';
+            document.getElementById('printReceiptBtn').style.display = b.paid > 0 ? '' : 'none';
+
+            const payments = App.data.payments.filter(p => p.orderId === o.id);
+            document.getElementById('payHistory').innerHTML = payments.length === 0 ? '' : `
+                <div class="pay-history-title">Paiements de cette commande</div>
+                ${payments.map(p => this.paymentRow(p)).join('')}`;
+            this.updateSummary();
         },
 
-        processPayment() {
-            const o = App.data.orders.find(x => x.id === this.selectedOrderId);
-            if (!o) return;
+        paymentRow(p) {
+            const refunded = App.refundedOf(p.id);
+            const time = new Date(p.paidAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+            return `<div class="pay-history-row">
+                <span>${App.esc(time)} · ${App.methodLabel(p.method)}</span>
+                <span>${App.fmt(p.amount)}${refunded ? ` <em class="neg">(-${App.fmt(refunded)})</em>` : ''}</span>
+                ${App.can('refunds.create') && refunded < p.amount ? `<button class="btn btn-small btn-secondary" onclick="App.caisse.openRefund('${p.id}')">Rembourser</button>` : '<span></span>'}
+            </div>`;
+        },
 
-            if (this.paymentMethod === 'especes') {
-                const received = parseInt(document.getElementById('cashReceived').value) || 0;
-                if (received < o.total) {
-                    App.toast('Montant insuffisant !', 'error');
-                    return;
-                }
+        renderLines() {
+            const methods = [['especes', 'Especes'], ['mobile', 'Mobile Money'], ['carte', 'Carte']];
+            document.getElementById('payLines').innerHTML = this.lines.map((l, i) => `
+                <div class="pay-line">
+                    <select onchange="App.caisse.setLine(${i}, 'method', this.value)" aria-label="Moyen de paiement">
+                        ${methods.map(([v, t]) => `<option value="${v}" ${l.method === v ? 'selected' : ''}>${t}</option>`).join('')}
+                    </select>
+                    <input type="number" min="1" step="25" inputmode="numeric" value="${App.esc(l.amount)}" placeholder="Montant" aria-label="Montant"
+                        oninput="App.caisse.setLine(${i}, 'amount', this.value)">
+                    ${l.method === 'especes' ? `<input type="number" min="0" step="25" inputmode="numeric" value="${App.esc(l.received)}" placeholder="Recu du client" aria-label="Montant recu"
+                        oninput="App.caisse.setLine(${i}, 'received', this.value)">` : '<span class="pay-line-spacer"></span>'}
+                    ${this.lines.length > 1 ? `<button class="pay-line-remove" title="Retirer" onclick="App.caisse.removeLine(${i})">&times;</button>` : ''}
+                </div>`).join('');
+            document.getElementById('payAddLine').style.display = this.lines.length < 4 ? '' : 'none';
+        },
+
+        setLine(i, field, value) {
+            if (!this.lines[i]) return;
+            this.lines[i][field] = value;
+            if (field === 'method') {
+                if (value !== 'especes') this.lines[i].received = '';
+                this.renderLines();
             }
-
-            o.status = 'payee';
-            o.paidAt = new Date().toISOString();
-            o.paymentMethod = this.paymentMethod;
-
-            App.data.payments.push({
-                id: App.genId(),
-                orderId: o.id,
-                orderNumber: o.number,
-                tableId: o.tableId,
-                amount: o.total,
-                method: this.paymentMethod,
-                paidAt: o.paidAt
-            });
-
-            const table = App.data.tables.find(t => t.id === o.tableId);
-            const hasOtherActive = App.data.orders.some(x => x.id !== o.id && x.tableId === o.tableId && (x.status === 'en_cours' || x.status === 'prete' || x.status === 'servie'));
-            if (table && !hasOtherActive) table.status = 'libre';
-
-            this.selectedOrderId = null;
-            App.saveData();
-            App.render();
-            App.toast('Paiement enregistre !');
+            this.updateSummary();
         },
 
-        printTicket() {
+        addLine() {
+            const o = App.data.orders.find(x => x.id === this.selectedOrderId);
+            if (!o || this.lines.length >= 4) return;
+            const left = App.balance(o).remaining - this.lineSum();
+            this.lines.push({ method: 'mobile', amount: left > 0 ? String(left) : '', received: '' });
+            this.renderLines();
+            this.updateSummary();
+        },
+
+        removeLine(i) {
+            this.lines.splice(i, 1);
+            this.renderLines();
+            this.updateSummary();
+        },
+
+        lineSum() {
+            return this.lines.reduce((s, l) => s + (parseInt(l.amount, 10) || 0), 0);
+        },
+
+        lineError(remaining) {
+            if (!App.myCashSession()) return 'Ouvrez votre caisse pour encaisser';
+            for (const l of this.lines) {
+                const a = parseInt(l.amount, 10);
+                if (!(a > 0)) return 'Indiquez un montant pour chaque moyen de paiement';
+                if (l.method === 'especes' && l.received !== '' && (parseInt(l.received, 10) || 0) < a) return 'Le montant recu est inferieur au montant en especes';
+            }
+            const sum = this.lineSum();
+            if (sum > remaining) return `Le total depasse le reste a payer (${App.fmt(remaining)})`;
+            return null;
+        },
+
+        updateSummary() {
+            const o = App.data.orders.find(x => x.id === this.selectedOrderId);
+            if (!o) return;
+            const remaining = App.balance(o).remaining;
+            const sum = this.lineSum();
+            const change = this.lines.reduce((s, l) => {
+                const r = parseInt(l.received, 10), a = parseInt(l.amount, 10);
+                return l.method === 'especes' && r > a ? s + (r - a) : s;
+            }, 0);
+            const error = this.lineError(remaining);
+            const after = Math.max(0, remaining - sum);
+            document.getElementById('paySummary').innerHTML = error
+                ? `<span class="pay-error">${App.esc(error)}</span>`
+                : `<span>Encaisse : <strong>${App.fmt(sum)}</strong></span>
+                   <span>${after > 0 ? `Reste apres : <strong>${App.fmt(after)}</strong>` : 'Commande soldee'}</span>
+                   ${change > 0 ? `<span class="pay-change">Monnaie a rendre : <strong>${App.fmt(change)}</strong></span>` : ''}`;
+            const btn = document.getElementById('payButton');
+            btn.disabled = !!error || this.busy || sum <= 0;
+            btn.textContent = this.busy ? 'Enregistrement...' : sum < remaining && sum > 0 ? `Encaisser ${App.fmt(sum)} (partiel)` : `Encaisser ${App.fmt(sum)}`;
+        },
+
+        async processPayment() {
+            const o = App.data.orders.find(x => x.id === this.selectedOrderId);
+            if (!o || this.busy) return;
+            const error = this.lineError(App.balance(o).remaining);
+            if (error) { App.toast(error, 'error'); return; }
+            const lines = this.lines.map(l => {
+                const line = { method: l.method, amount: parseInt(l.amount, 10) };
+                if (l.method === 'especes' && l.received !== '') line.received = parseInt(l.received, 10);
+                return line;
+            });
+            this.busy = true;
+            this.updateSummary();
+            try {
+                await App.serverAction('/payments', { id: this.pendingId, orderId: o.id, lines });
+                this.pendingId = App.genId();
+                const updated = App.data.orders.find(x => x.id === o.id);
+                const b = App.balance(updated);
+                App.toast(b.remaining === 0 ? 'Paiement enregistre : commande soldee' : `Paiement partiel enregistre · reste ${App.fmt(b.remaining)}`);
+                this.lines = [{ method: 'especes', amount: b.remaining ? String(b.remaining) : '', received: '' }];
+                this.renderLines();
+            } catch (e) {
+                // Same pendingId is kept so a retry after a network error cannot create a second payment.
+                App.toast(e.status ? e.message : 'Connexion impossible : paiement NON enregistre, reessayez', 'error');
+            } finally {
+                this.busy = false;
+                this.render();
+            }
+        },
+
+        renderOperations() {
+            const today = new Date().toDateString();
+            const ops = [
+                ...App.data.payments.filter(p => new Date(p.paidAt).toDateString() === today).map(p => ({ kind: 'p', at: p.paidAt, x: p })),
+                ...App.data.refunds.filter(r => new Date(r.at).toDateString() === today).map(r => ({ kind: 'r', at: r.at, x: r }))
+            ].sort((a, b) => b.at.localeCompare(a.at));
+            const tbody = document.getElementById('paymentsBody');
+            if (ops.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-secondary)">Aucune operation aujourd\'hui</td></tr>';
+                return;
+            }
+            tbody.innerHTML = ops.map(({ kind, at, x }) => {
+                const time = new Date(at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+                const num = `#${String(x.orderNumber).padStart(3, '0')}`;
+                if (kind === 'r') {
+                    return `<tr class="op-refund">
+                        <td>${App.esc(time)}</td><td>${App.esc(num)}</td>
+                        <td>Remboursement — ${App.esc(x.reason)}</td>
+                        <td><strong class="neg">-${App.fmt(x.amount)}</strong></td>
+                        <td>${App.methodLabel(x.method)}</td><td>${App.esc(x.staffName || '')}</td><td></td>
+                    </tr>`;
+                }
+                const refundable = x.amount - App.refundedOf(x.id);
+                return `<tr>
+                    <td>${App.esc(time)}</td><td>${App.esc(num)}</td><td>Paiement</td>
+                    <td><strong>${App.fmt(x.amount)}</strong></td>
+                    <td>${App.methodLabel(x.method)}</td><td>${App.esc(x.staffName || '')}</td>
+                    <td class="op-actions">
+                        <button class="btn btn-small btn-secondary" onclick="App.tickets.receipt('${App.esc(x.orderId)}')">Recu</button>
+                        ${App.can('refunds.create') && refundable > 0 ? `<button class="btn btn-small btn-secondary" onclick="App.caisse.openRefund('${App.esc(x.id)}')">Rembourser</button>` : ''}
+                    </td>
+                </tr>`;
+            }).join('');
+        },
+
+        openRefund(paymentId) {
+            const p = App.data.payments.find(x => x.id === paymentId);
+            if (!p) return;
+            const max = p.amount - App.refundedOf(p.id);
+            this.refundPaymentId = paymentId;
+            this.pendingRefundId = App.genId();
+            document.getElementById('refundInfo').textContent =
+                `Commande #${String(p.orderNumber).padStart(3, '0')} · ${App.methodLabel(p.method)} · ${App.fmt(p.amount)} encaisse le ` +
+                `${new Date(p.paidAt).toLocaleString('fr-FR')}. Remboursable : ${App.fmt(max)}.`;
+            document.getElementById('refundAmount').value = max;
+            document.getElementById('refundAmount').max = max;
+            document.getElementById('refundReason').value = '';
+            document.getElementById('modalRefund').classList.add('open');
+        },
+
+        closeRefund() {
+            document.getElementById('modalRefund').classList.remove('open');
+        },
+
+        async submitRefund() {
+            const btn = document.getElementById('refundBtn');
+            if (btn.disabled) return;
+            const amount = parseInt(document.getElementById('refundAmount').value, 10);
+            const reason = document.getElementById('refundReason').value.trim();
+            if (!(amount > 0)) { App.toast('Montant invalide', 'error'); return; }
+            if (reason.length < 3) { App.toast('Le motif est obligatoire', 'error'); return; }
+            btn.disabled = true;
+            try {
+                await App.serverAction('/refunds', { id: this.pendingRefundId, paymentId: this.refundPaymentId, amount, reason });
+                this.closeRefund();
+                App.toast(`Remboursement de ${App.fmt(amount)} enregistre`);
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible : remboursement NON enregistre', 'error');
+            } finally {
+                btn.disabled = false;
+            }
+        }
+    },
+
+    cash: {
+        barKey: null,
+        busy: false,
+        pendingOpenId: null,
+        closingId: null,
+
+        totals(sessionId) {
+            const t = { payments: { especes: 0, mobile: 0, carte: 0 }, refunds: { especes: 0, mobile: 0, carte: 0 }, count: 0 };
+            App.data.payments.filter(p => p.sessionId === sessionId).forEach(p => { t.payments[p.method] += p.amount; t.count++; });
+            App.data.refunds.filter(r => r.sessionId === sessionId).forEach(r => { t.refunds[r.method] += r.amount; });
+            return t;
+        },
+
+        expected(s) {
+            const t = this.totals(s.id);
+            return s.openingFloat + t.payments.especes - t.refunds.especes;
+        },
+
+        renderBar() {
+            const bar = document.getElementById('cashSessionBar');
+            if (!App.can('cash.session')) { bar.innerHTML = ''; this.barKey = null; return; }
+            const s = App.myCashSession();
+            if (!s) {
+                if (this.barKey === 'closed') return;
+                this.barKey = 'closed';
+                bar.innerHTML = `<div class="cash-bar closed">
+                    <div class="cash-bar-text"><strong>Caisse fermee</strong><span>Comptez le fonds de caisse puis ouvrez la caisse pour encaisser.</span></div>
+                    <div class="cash-bar-form">
+                        <input type="number" id="openFloat" min="0" step="25" inputmode="numeric" placeholder="Fonds initial (FCFA)" aria-label="Fonds de caisse initial">
+                        <button class="btn btn-primary" id="openCashBtn" onclick="App.cash.open()">Ouvrir la caisse</button>
+                    </div>
+                </div>`;
+                return;
+            }
+            const t = this.totals(s.id);
+            const key = `open:${s.id}:${this.expected(s)}:${t.count}`;
+            if (this.barKey === key) return;
+            this.barKey = key;
+            const since = new Date(s.openedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+            bar.innerHTML = `<div class="cash-bar open">
+                <div class="cash-bar-text">
+                    <strong>Caisse ouverte depuis ${App.esc(since)}</strong>
+                    <span>Fonds ${App.fmt(s.openingFloat)} · ${t.count} paiement(s) · Especes attendues dans le tiroir : <strong>${App.fmt(this.expected(s))}</strong></span>
+                </div>
+                <button class="btn btn-secondary" onclick="App.cash.openCloseModal('${App.esc(s.id)}')">Cloturer la caisse</button>
+            </div>`;
+        },
+
+        async open() {
+            if (this.busy) return;
+            const raw = document.getElementById('openFloat').value;
+            const openingFloat = parseInt(raw, 10);
+            if (raw === '' || !(openingFloat >= 0)) { App.toast('Indiquez le fonds de caisse (0 si vide)', 'error'); return; }
+            this.pendingOpenId = this.pendingOpenId || App.genId();
+            this.busy = true;
+            document.getElementById('openCashBtn').disabled = true;
+            try {
+                await App.serverAction('/cash/open', { id: this.pendingOpenId, openingFloat });
+                this.pendingOpenId = null;
+                App.toast('Caisse ouverte');
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible', 'error');
+                const btn = document.getElementById('openCashBtn');
+                if (btn) btn.disabled = false;
+            } finally {
+                this.busy = false;
+            }
+        },
+
+        openCloseModal(sessionId) {
+            const s = App.data.cashSessions.find(x => x.id === sessionId);
+            if (!s || s.status !== 'ouverte') return;
+            this.closingId = sessionId;
+            const t = this.totals(s.id);
+            const row = (label, v, cls = '') => `<div class="close-row ${cls}"><span>${label}</span><strong>${v}</strong></div>`;
+            document.getElementById('closeRecap').innerHTML = `
+                ${row('Caissier', App.esc(s.staffName))}
+                ${row('Ouverture', App.esc(new Date(s.openedAt).toLocaleString('fr-FR')))}
+                ${row('Fonds initial', App.fmt(s.openingFloat))}
+                ${row('Ventes en especes', '+' + App.fmt(t.payments.especes))}
+                ${row('Remboursements en especes', '-' + App.fmt(t.refunds.especes))}
+                ${row('Especes attendues', App.fmt(this.expected(s)), 'total')}
+                ${row('Mobile Money', App.fmt(t.payments.mobile - t.refunds.mobile), 'muted')}
+                ${row('Carte', App.fmt(t.payments.carte - t.refunds.carte), 'muted')}`;
+            document.getElementById('closeCounted').value = '';
+            document.getElementById('closeNote').value = '';
+            document.getElementById('closeDiff').innerHTML = '';
+            document.getElementById('modalCloseCash').classList.add('open');
+            document.getElementById('closeCounted').focus();
+        },
+
+        updateDiff() {
+            const s = App.data.cashSessions.find(x => x.id === this.closingId);
+            const raw = document.getElementById('closeCounted').value;
+            const el = document.getElementById('closeDiff');
+            if (!s || raw === '') { el.innerHTML = ''; return; }
+            const diff = (parseInt(raw, 10) || 0) - this.expected(s);
+            el.className = 'close-diff ' + (diff === 0 ? 'ok' : diff > 0 ? 'plus' : 'minus');
+            el.textContent = diff === 0 ? 'Caisse juste' : diff > 0 ? `Excedent de ${App.fmt(diff)}` : `Manque de ${App.fmt(-diff)}`;
+        },
+
+        closeModal() {
+            document.getElementById('modalCloseCash').classList.remove('open');
+        },
+
+        async close() {
+            const s = App.data.cashSessions.find(x => x.id === this.closingId);
+            if (!s || this.busy) return;
+            const raw = document.getElementById('closeCounted').value;
+            const countedCash = parseInt(raw, 10);
+            const note = document.getElementById('closeNote').value.trim();
+            if (raw === '' || !(countedCash >= 0)) { App.toast('Saisissez le montant compte', 'error'); return; }
+            if (countedCash !== this.expected(s) && note.length < 3) { App.toast("Expliquez l'ecart dans le commentaire", 'error'); return; }
+            this.busy = true;
+            document.getElementById('closeCashBtn').disabled = true;
+            try {
+                await App.serverAction('/cash/close', { sessionId: s.id, countedCash, note });
+                this.closeModal();
+                const closed = App.data.cashSessions.find(x => x.id === s.id);
+                App.toast(closed && closed.diff ? `Caisse cloturee · ecart ${App.fmt(closed.diff)}` : 'Caisse cloturee · caisse juste');
+                App.tickets.closing(s.id);
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible : caisse NON cloturee', 'error');
+            } finally {
+                this.busy = false;
+                document.getElementById('closeCashBtn').disabled = false;
+            }
+        },
+
+        renderHistory() {
+            const tbody = document.getElementById('cashSessionsBody');
+            if (!App.can('cash.history')) return;
+            const sessions = [...App.data.cashSessions].sort((a, b) => b.openedAt.localeCompare(a.openedAt)).slice(0, 30);
+            if (sessions.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-secondary)">Aucune session</td></tr>';
+                return;
+            }
+            const dt = iso => new Date(iso).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+            tbody.innerHTML = sessions.map(s => {
+                const open = s.status === 'ouverte';
+                const diffCls = open ? '' : s.diff === 0 ? 'diff-ok' : 'diff-bad';
+                return `<tr>
+                    <td>${App.esc(s.staffName)}</td>
+                    <td>${App.esc(dt(s.openedAt))}</td>
+                    <td>${open ? '<span class="order-status en_cours">ouverte</span>' : App.esc(dt(s.closedAt))}</td>
+                    <td>${App.fmt(open ? this.expected(s) : s.expectedCash)}</td>
+                    <td>${open ? '—' : App.fmt(s.countedCash)}</td>
+                    <td class="${diffCls}">${open ? '—' : (s.diff > 0 ? '+' : '') + App.fmt(s.diff)}${!open && s.note ? `<div class="diff-note">${App.esc(s.note)}</div>` : ''}</td>
+                    <td>${open
+                        ? `<button class="btn btn-small btn-secondary" onclick="App.cash.openCloseModal('${App.esc(s.id)}')">Cloturer</button>`
+                        : `<button class="btn btn-small btn-secondary" onclick="App.tickets.closing('${App.esc(s.id)}')">Imprimer</button>`}</td>
+                </tr>`;
+            }).join('');
+        }
+    },
+
+    tickets: {
+        print(html) {
+            const area = document.getElementById('printArea');
+            area.innerHTML = `<div class="ticket-print">${html}</div>`;
+            document.body.classList.add('printing');
+            const cleanup = () => {
+                document.body.classList.remove('printing');
+                area.innerHTML = '';
+            };
+            window.addEventListener('afterprint', cleanup, { once: true });
             window.print();
         },
 
-        renderPayments() {
-            const today = new Date().toDateString();
-            const payments = App.data.payments.filter(p => new Date(p.paidAt).toDateString() === today).reverse();
-            const tbody = document.getElementById('paymentsBody');
-            if (payments.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-secondary)">Aucun paiement aujourd\'hui</td></tr>';
-                return;
-            }
-            tbody.innerHTML = payments.map(p => {
-                const table = App.data.tables.find(t => t.id === p.tableId);
-                const time = new Date(p.paidAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-                const methods = { especes: '💵 Especes', mobile: '📱 Mobile', carte: '💳 Carte' };
-                return `<tr>
-                    <td>${time}</td>
-                    <td>#${String(p.orderNumber).padStart(3, '0')}</td>
-                    <td>T${table ? table.number : '?'}</td>
-                    <td><strong>${App.fmt(p.amount)}</strong></td>
-                    <td>${methods[p.method] || p.method}</td>
-                </tr>`;
-            }).join('');
+        head(title) {
+            return `<div class="tp-center">
+                <div class="tp-name">Restaurant Sissiman</div>
+                <div>Bobo-Dioulasso, Burkina Faso</div>
+                <div class="tp-title">${title}</div>
+            </div>`;
+        },
+
+        row(left, right, cls = '') {
+            return `<div class="tp-row ${cls}"><span>${left}</span><span>${right}</span></div>`;
+        },
+
+        orderMeta(o) {
+            const table = App.data.tables.find(t => t.id === o.tableId);
+            return `<div class="tp-meta">
+                <div>Commande #${String(o.number).padStart(3, '0')} · Table ${table ? table.number : '?'} · ${o.covers || 1} couvert(s)</div>
+                <div>${App.esc(new Date().toLocaleString('fr-FR'))}</div>
+            </div>`;
+        },
+
+        items(o) {
+            return `<div class="tp-sep"></div>${o.items.map(it => this.row(`${it.qty} x ${App.esc(it.name)}`, App.fmt(it.price * it.qty))).join('')}
+                <div class="tp-sep"></div>${this.row('TOTAL', App.fmt(o.total), 'tp-big')}`;
+        },
+
+        bill(orderId) {
+            const o = App.data.orders.find(x => x.id === orderId);
+            if (!o) return;
+            const b = App.balance(o);
+            this.print(`${this.head('ADDITION')}${this.orderMeta(o)}${this.items(o)}
+                ${b.paid ? this.row('Deja paye', '-' + App.fmt(b.paid)) : ''}
+                ${this.row('RESTE A PAYER', App.fmt(b.remaining), 'tp-big')}
+                <div class="tp-sep"></div><div class="tp-center">Merci de votre visite !</div>`);
+        },
+
+        receipt(orderId) {
+            const o = App.data.orders.find(x => x.id === orderId);
+            if (!o) return;
+            const b = App.balance(o);
+            const payments = App.data.payments.filter(p => p.orderId === o.id);
+            const refunds = App.data.refunds.filter(r => r.orderId === o.id);
+            const t = iso => new Date(iso).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+            this.print(`${this.head('RECU DE PAIEMENT')}${this.orderMeta(o)}${this.items(o)}
+                <div class="tp-sep"></div>
+                ${payments.map(p => this.row(`${App.esc(t(p.paidAt))} ${App.methodLabel(p.method)}`, App.fmt(p.amount)) +
+                    (p.received ? this.row('&nbsp;&nbsp;Recu / rendu', `${App.fmt(p.received)} / ${App.fmt(p.change || 0)}`, 'tp-small') : '')).join('')}
+                ${refunds.map(r => this.row(`${App.esc(t(r.at))} Remboursement`, '-' + App.fmt(r.amount)) + `<div class="tp-small">Motif : ${App.esc(r.reason)}</div>`).join('')}
+                <div class="tp-sep"></div>
+                ${this.row('TOTAL PAYE', App.fmt(b.paid - b.refunded), 'tp-big')}
+                ${b.remaining ? this.row('RESTE A PAYER', App.fmt(b.remaining), 'tp-big') : '<div class="tp-center tp-title">SOLDE</div>'}
+                <div class="tp-sep"></div>
+                <div class="tp-center tp-small">Caissier : ${App.esc((payments[payments.length - 1] || {}).staffName || '')}</div>
+                <div class="tp-center">Merci de votre visite !</div>`);
+        },
+
+        kitchen(orderId) {
+            const o = App.data.orders.find(x => x.id === orderId);
+            if (!o) return;
+            const table = App.data.tables.find(t => t.id === o.tableId);
+            this.print(`<div class="tp-center tp-title">CUISINE</div>
+                <div class="tp-kitchen-head">#${String(o.number).padStart(3, '0')} · TABLE ${table ? table.number : '?'}</div>
+                <div class="tp-center">Recue a ${App.esc(new Date(o.createdAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }))}</div>
+                <div class="tp-sep"></div>
+                ${o.items.map(it => `<div class="tp-kitchen-item"><strong>${it.qty} x</strong> ${App.esc(it.name)}</div>`).join('')}
+                ${o.note ? `<div class="tp-sep"></div><div class="tp-kitchen-note">NOTE : ${App.esc(o.note)}</div>` : ''}`);
+        },
+
+        closing(sessionId) {
+            const s = App.data.cashSessions.find(x => x.id === sessionId);
+            if (!s || s.status !== 'fermee') return;
+            const t = s.totals;
+            const dt = iso => App.esc(new Date(iso).toLocaleString('fr-FR'));
+            this.print(`${this.head('RAPPORT DE CLOTURE')}
+                <div class="tp-meta"><div>Caissier : ${App.esc(s.staffName)}</div><div>Ouverture : ${dt(s.openedAt)}</div>
+                <div>Cloture : ${dt(s.closedAt)} par ${App.esc(s.closedByName)}</div></div>
+                <div class="tp-sep"></div>
+                ${this.row('Fonds initial', App.fmt(s.openingFloat))}
+                ${this.row('Ventes especes', App.fmt(t.payments.especes))}
+                ${this.row('Ventes Mobile Money', App.fmt(t.payments.mobile))}
+                ${this.row('Ventes carte', App.fmt(t.payments.carte))}
+                ${this.row('Nombre de paiements', t.paymentCount)}
+                ${this.row('Remboursements especes', '-' + App.fmt(t.refunds.especes))}
+                ${this.row('Remboursements autres', '-' + App.fmt(t.refunds.mobile + t.refunds.carte))}
+                <div class="tp-sep"></div>
+                ${this.row('Especes attendues', App.fmt(s.expectedCash))}
+                ${this.row('Especes comptees', App.fmt(s.countedCash))}
+                ${this.row('ECART', (s.diff > 0 ? '+' : '') + App.fmt(s.diff), 'tp-big')}
+                ${s.note ? `<div class="tp-small">Commentaire : ${App.esc(s.note)}</div>` : ''}
+                <div class="tp-sep"></div>
+                <div class="tp-sign">Signature caissier :</div><div class="tp-sign">Signature gerant :</div>`);
         }
     },
 
@@ -1434,6 +1883,7 @@ const App = {
                     <div class="cuisine-ticket-actions">
                         ${o.status === 'en_cours' && App.can('orders.ready') ? `<button class="btn btn-primary" onclick="App.cuisine.markReady('${o.id}')">Pret !</button>` : ''}
                         ${o.status === 'prete' && App.can('orders.serve') ? `<button class="btn btn-success" onclick="App.orders.updateStatus('${o.id}','servie')">Servie</button>` : ''}
+                        <button class="btn btn-secondary" title="Imprimer le ticket cuisine" onclick="App.tickets.kitchen('${o.id}')">Imprimer</button>
                     </div>
                 </div>`;
             }).join('');
@@ -1473,20 +1923,21 @@ const App = {
             this.render();
         },
 
-        getFilteredPayments() {
+        inPeriod(iso) {
             const now = new Date();
-            const payments = App.data.payments;
-            if (this.period === 'jour') {
-                const today = now.toDateString();
-                return payments.filter(p => new Date(p.paidAt).toDateString() === today);
-            } else if (this.period === 'semaine') {
-                const week = new Date(now - 7 * 86400000);
-                return payments.filter(p => new Date(p.paidAt) >= week);
-            } else if (this.period === 'mois') {
-                const month = new Date(now - 30 * 86400000);
-                return payments.filter(p => new Date(p.paidAt) >= month);
-            }
-            return payments;
+            const d = new Date(iso);
+            if (this.period === 'jour') return d.toDateString() === now.toDateString();
+            if (this.period === 'semaine') return d >= new Date(now - 7 * 86400000);
+            if (this.period === 'mois') return d >= new Date(now - 30 * 86400000);
+            return true;
+        },
+
+        // Refunds are folded in as negative entries so every chart shows net cash.
+        getFilteredPayments() {
+            return [
+                ...App.data.payments.filter(p => this.inPeriod(p.paidAt)),
+                ...App.data.refunds.filter(r => this.inPeriod(r.at)).map(r => ({ ...r, paidAt: r.at, amount: -r.amount }))
+            ];
         },
 
         getFilteredOrders() {
@@ -1509,12 +1960,12 @@ const App = {
             const payments = this.getFilteredPayments();
             const orders = this.getFilteredOrders();
             const total = payments.reduce((s, p) => s + p.amount, 0);
-            const avgTicket = payments.length > 0 ? Math.round(total / payments.length) : 0;
             const paidOrders = orders.filter(o => o.status === 'payee');
+            const avgTicket = paidOrders.length > 0 ? Math.round(paidOrders.reduce((s, o) => s + o.total, 0) / paidOrders.length) : 0;
             const covers = paidOrders.reduce((s, o) => s + (o.covers || 1), 0);
 
             document.getElementById('rapportsSummary').innerHTML = `
-                <div class="rapport-card"><div class="label">Chiffre d'affaires</div><div class="value gold">${App.fmt(total)}</div></div>
+                <div class="rapport-card"><div class="label">Encaissements nets</div><div class="value gold">${App.fmt(total)}</div></div>
                 <div class="rapport-card"><div class="label">Commandes</div><div class="value">${orders.length}</div></div>
                 <div class="rapport-card"><div class="label">Ticket moyen</div><div class="value">${App.fmt(avgTicket)}</div></div>
                 <div class="rapport-card"><div class="label">Couverts</div><div class="value">${covers}</div></div>
@@ -1537,12 +1988,12 @@ const App = {
                 byDay[day] = (byDay[day] || 0) + p.amount;
             });
             const entries = Object.entries(byDay).slice(-7);
-            const max = Math.max(...entries.map(e => e[1]));
+            const max = Math.max(1, ...entries.map(e => e[1]));
 
             container.innerHTML = entries.map(([day, val]) => `
                 <div class="chart-bar-row">
                     <span class="chart-bar-label">${day}</span>
-                    <div class="chart-bar-track"><div class="chart-bar-fill" style="width:${max ? (val/max*100) : 0}%"></div></div>
+                    <div class="chart-bar-track"><div class="chart-bar-fill" style="width:${Math.max(0, val / max * 100)}%"></div></div>
                     <span class="chart-bar-value">${App.fmt(val)}</span>
                 </div>
             `).join('');
@@ -1579,10 +2030,14 @@ const App = {
             payments.forEach(p => {
                 methods[p.method] = (methods[p.method] || 0) + p.amount;
             });
-            const total = payments.reduce((s, p) => s + p.amount, 0);
             const colors = { especes: '#16a34a', mobile: '#2563eb', carte: '#d97706' };
             const labels = { especes: 'Especes', mobile: 'Mobile Money', carte: 'Carte' };
-            const entries = Object.entries(methods);
+            const entries = Object.entries(methods).filter(([, v]) => v > 0);
+            const total = entries.reduce((s, [, v]) => s + v, 0);
+            if (total <= 0) {
+                container.innerHTML = '<p class="empty-state">Aucune donnee</p>';
+                return;
+            }
 
             let cumul = 0;
             const segments = entries.map(([method, val]) => {

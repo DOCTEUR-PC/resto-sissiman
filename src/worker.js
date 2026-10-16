@@ -1,4 +1,8 @@
-const COLLECTIONS = new Set(['tables', 'categories', 'menuItems', 'orders', 'payments']);
+const COLLECTIONS = new Set(['tables', 'categories', 'menuItems', 'orders', 'payments', 'refunds', 'cashSessions']);
+const SERVER_ONLY = new Set(['payments', 'refunds', 'cashSessions']);
+const ORDER_SERVER_FIELDS = ['paid', 'refunded', 'paidAt', 'paymentMethod'];
+const ACTIVE_ORDER = ['en_cours', 'prete', 'servie'];
+const ID_RE = /^[a-zA-Z0-9_-]{8,60}$/;
 const ROLES = new Set(['gerant', 'caissier', 'serveur', 'cuisinier']);
 const PAYMENT_METHODS = new Set(['especes', 'mobile', 'carte']);
 const SESSION_TTL = 7 * 24 * 3600 * 1000;
@@ -160,17 +164,15 @@ function changedFields(before, after) {
     return out;
 }
 
+// "payee" is only reachable through POST /api/payments.
 const ORDER_TRANSITIONS = {
     'en_cours>prete': ['gerant', 'cuisinier', 'serveur'],
     'prete>servie': ['gerant', 'serveur', 'caissier'],
     'en_cours>annulee': ['gerant', 'caissier'],
     'prete>annulee': ['gerant', 'caissier'],
-    'servie>annulee': ['gerant', 'caissier'],
-    'en_cours>payee': ['gerant', 'caissier'],
-    'prete>payee': ['gerant', 'caissier'],
-    'servie>payee': ['gerant', 'caissier']
+    'servie>annulee': ['gerant', 'caissier']
 };
-const ORDER_MUTABLE = new Set(['status', 'paidAt', 'paymentMethod']);
+const ORDER_MUTABLE = new Set(['status']);
 
 // Returns an error message when the change is not allowed, null otherwise.
 async function checkChange(c, ctx) {
@@ -201,17 +203,10 @@ async function checkChange(c, ctx) {
             return 'Seul le gerant peut creer, modifier ou supprimer des tables';
         }
 
-        case 'payments': {
-            if (before) return before && !after ? 'Un paiement ne peut pas etre supprime' : 'Un paiement ne peut pas etre modifie';
-            if (!can(user, 'gerant', 'caissier')) return 'Seuls le caissier et le gerant peuvent encaisser';
-            if (!PAYMENT_METHODS.has(after.method)) return 'Mode de paiement invalide';
-            const order = await ctx.lookup('orders', after.orderId);
-            if (!order) return 'Commande introuvable pour ce paiement';
-            if (order.status === 'annulee') return 'Commande annulee';
-            if (after.amount !== order.total) return 'Le montant ne correspond pas au total de la commande';
-            if (await ctx.orderHasPayment(after.orderId, c.id)) return 'Cette commande est deja payee';
-            return null;
-        }
+        case 'payments':
+        case 'refunds':
+        case 'cashSessions':
+            return 'Les operations de caisse doivent passer par l\'ecran Caisse';
 
         case 'orders': {
             if (!after) return 'Une commande ne peut pas etre supprimee, annulez-la';
@@ -234,11 +229,13 @@ async function checkChange(c, ctx) {
                 return null;
             }
             if (!onlyChanged(ORDER_MUTABLE)) return 'Les articles et le total ne peuvent plus etre modifies';
-            if (before.status === after.status) return can(user, 'gerant', 'caissier') ? null : 'Modification non autorisee';
             const roles = ORDER_TRANSITIONS[before.status + '>' + after.status];
+            if (after.status === 'payee') return "Une commande passe a « payee » uniquement par l'encaissement";
             if (!roles) return `Passage de "${before.status}" a "${after.status}" impossible`;
             if (!roles.includes(user.role)) return 'Votre role ne permet pas ce changement de statut';
-            if (after.status === 'payee' && !(await ctx.orderHasPayment(c.id))) return 'Aucun paiement enregistre pour cette commande';
+            if (after.status === 'annulee' && (before.paid || 0) - (before.refunded || 0) > 0) {
+                return 'Cette commande a des paiements : remboursez-les avant de l\'annuler';
+            }
             return null;
         }
     }
@@ -264,7 +261,8 @@ async function push(request, db, user) {
 
     const changes = [];
     for (const c of raw) {
-        if (!c || !COLLECTIONS.has(c.collection) || typeof c.id !== 'string' || !c.id || c.id.length > 100) {
+        // Ids end up inside onclick attributes on the client, so only plain characters are accepted.
+        if (!c || !COLLECTIONS.has(c.collection) || typeof c.id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(c.id)) {
             return fail(400, 'Modification invalide');
         }
         let after = null;
@@ -277,10 +275,19 @@ async function push(request, db, user) {
     }
 
     const existing = await loadRecords(db, [...new Set(changes.map(c => c.key))]);
-    for (const c of changes) c.before = existing.get(c.key) || null;
+    for (const c of changes) {
+        c.before = existing.get(c.key) || null;
+        // Payment fields on orders belong to the server; a client's stale copy must not overwrite them.
+        if (c.collection === 'orders' && c.after) {
+            for (const f of ORDER_SERVER_FIELDS) {
+                if (c.before && f in c.before) c.after[f] = c.before[f]; else delete c.after[f];
+            }
+            c.data = JSON.stringify(c.after);
+        }
+    }
 
-    // Payments are checked before orders so an order can be marked paid with the payment sent in the same batch.
-    const rank = { categories: 0, menuItems: 1, tables: 2, payments: 3, orders: 4 };
+    // Menu and tables first so a new order can reference items created in the same batch.
+    const rank = { categories: 0, menuItems: 1, tables: 2, orders: 3, payments: 4, refunds: 4, cashSessions: 4 };
     const ordered = [...changes].sort((a, b) => rank[a.collection] - rank[b.collection]);
 
     const accepted = new Map();
@@ -294,14 +301,6 @@ async function push(request, db, user) {
             if (existing.has(key)) return existing.get(key);
             if (!extraCache.has(key)) extraCache.set(key, (await loadRecords(db, [key])).get(key) || null);
             return extraCache.get(key);
-        },
-        async orderHasPayment(orderId, exceptPaymentId) {
-            for (const a of accepted.values()) {
-                if (a.collection === 'payments' && a.after && a.after.orderId === orderId && a.id !== exceptPaymentId) return true;
-            }
-            const row = await db.prepare(`SELECT id FROM records WHERE collection = 'payments' AND deleted = 0
-                AND json_extract(data, '$.orderId') = ? AND id != ? LIMIT 1`).bind(orderId, exceptPaymentId || '').first();
-            return !!row;
         }
     };
 
@@ -358,6 +357,221 @@ async function nextOrderNumber(request, db, user) {
     const row = await db.prepare(`INSERT INTO counters (name, value) VALUES ('order', ?)
         ON CONFLICT (name) DO UPDATE SET value = MAX(value + 1, excluded.value) RETURNING value`).bind(min).first();
     return json({ number: row.value });
+}
+
+// ---------- CAISSE ----------
+// Each write below is guarded by the order's (or session's) exact stored JSON, so two cashiers acting on the
+// same record at once cannot both succeed: the batch's last UPDATE reports 0 changes for the loser.
+
+const rec = (collection, obj) => ({ collection, id: obj.id, data: JSON.stringify(obj), deleted: 0 });
+
+async function getRecord(db, collection, id) {
+    if (typeof id !== 'string' || !id) return null;
+    const row = await db.prepare('SELECT data FROM records WHERE collection = ? AND id = ? AND deleted = 0').bind(collection, id).first();
+    return row ? { raw: row.data, obj: JSON.parse(row.data) } : null;
+}
+
+async function openSessionOf(db, staffId) {
+    const row = await db.prepare(`SELECT data FROM records WHERE collection = 'cashSessions' AND deleted = 0
+        AND json_extract(data, '$.staffId') = ? AND json_extract(data, '$.status') = 'ouverte' LIMIT 1`).bind(staffId).first();
+    return row ? { raw: row.data, obj: JSON.parse(row.data) } : null;
+}
+
+function guardedInsert(db, collection, obj, now, guardCollection, guardId, guardRaw) {
+    return db.prepare(`INSERT INTO records (collection, id, data, deleted, updated_at)
+        SELECT ?, ?, ?, 0, ? WHERE EXISTS (SELECT 1 FROM records WHERE collection = ? AND id = ? AND data = ?)`)
+        .bind(collection, obj.id, JSON.stringify(obj), now, guardCollection, guardId, guardRaw);
+}
+
+function guardedUpdate(db, collection, obj, now, guardRaw) {
+    return db.prepare('UPDATE records SET data = ?, updated_at = ? WHERE collection = ? AND id = ? AND data = ?')
+        .bind(JSON.stringify(obj), now, collection, obj.id, guardRaw);
+}
+
+const isUniqueError = e => String(e).includes('UNIQUE') || String(e).includes('PRIMARY KEY');
+const CONFLICT = 'Cette operation a ete modifiee en meme temps sur un autre poste. Reessayez.';
+
+async function openCash(request, db, user) {
+    if (!can(user, 'gerant', 'caissier')) return fail(403, 'Reserve au caissier et au gerant');
+    const body = await readBody(request);
+    if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
+    if (!isInt(body.openingFloat, 0, 100000000)) return fail(400, 'Fonds de caisse invalide');
+    const dup = await getRecord(db, 'cashSessions', body.id);
+    if (dup) return json({ duplicate: true, records: [rec('cashSessions', dup.obj)] });
+    if (await openSessionOf(db, user.id)) return fail(409, 'Vous avez deja une caisse ouverte');
+
+    const session = {
+        id: body.id, staffId: user.id, staffName: user.name, status: 'ouverte',
+        openedAt: new Date().toISOString(), openingFloat: body.openingFloat
+    };
+    const res = await db.prepare(`INSERT INTO records (collection, id, data, deleted, updated_at)
+        SELECT 'cashSessions', ?, ?, 0, ? WHERE NOT EXISTS (SELECT 1 FROM records WHERE collection = 'cashSessions'
+        AND deleted = 0 AND json_extract(data, '$.staffId') = ? AND json_extract(data, '$.status') = 'ouverte')`)
+        .bind(session.id, JSON.stringify(session), Date.now(), user.id).run();
+    if (!res.meta.changes) return fail(409, 'Vous avez deja une caisse ouverte');
+    await auditStmt(db, user, 'ouverture_caisse', 'cashSessions', session.id, { fonds: session.openingFloat }).run();
+    return json({ ok: true, records: [rec('cashSessions', session)] });
+}
+
+async function sessionTotals(db, sessionId) {
+    const { results } = await db.prepare(`SELECT collection, data FROM records WHERE collection IN ('payments', 'refunds')
+        AND deleted = 0 AND json_extract(data, '$.sessionId') = ?`).bind(sessionId).all();
+    const t = { payments: { especes: 0, mobile: 0, carte: 0 }, refunds: { especes: 0, mobile: 0, carte: 0 }, paymentCount: 0, refundCount: 0 };
+    for (const r of results) {
+        const d = JSON.parse(r.data);
+        const bucket = r.collection === 'payments' ? t.payments : t.refunds;
+        bucket[d.method] = (bucket[d.method] || 0) + d.amount;
+        if (r.collection === 'payments') t.paymentCount++; else t.refundCount++;
+    }
+    return t;
+}
+
+async function closeCash(request, db, user) {
+    if (!can(user, 'gerant', 'caissier')) return fail(403, 'Reserve au caissier et au gerant');
+    const body = await readBody(request);
+    const s = body && await getRecord(db, 'cashSessions', body.sessionId);
+    if (!s) return fail(404, 'Session de caisse introuvable');
+    if (s.obj.status !== 'ouverte') return fail(409, 'Cette caisse est deja cloturee');
+    if (s.obj.staffId !== user.id && user.role !== 'gerant') return fail(403, "Seul le gerant peut cloturer la caisse d'un autre");
+    if (!isInt(body.countedCash, 0, 1000000000)) return fail(400, 'Montant compte invalide');
+    const note = typeof body.note === 'string' ? body.note.trim().slice(0, 300) : '';
+
+    const totals = await sessionTotals(db, s.obj.id);
+    const expectedCash = s.obj.openingFloat + totals.payments.especes - totals.refunds.especes;
+    const closed = {
+        ...s.obj, status: 'fermee', closedAt: new Date().toISOString(), closedById: user.id, closedByName: user.name,
+        totals, expectedCash, countedCash: body.countedCash, diff: body.countedCash - expectedCash, note
+    };
+    const res = await guardedUpdate(db, 'cashSessions', closed, Date.now(), s.raw).run();
+    if (!res.meta.changes) return fail(409, CONFLICT);
+    await auditStmt(db, user, 'cloture_caisse', 'cashSessions', closed.id,
+        { attendu: expectedCash, compte: closed.countedCash, ecart: closed.diff, caissier: s.obj.staffName }).run();
+    return json({ ok: true, records: [rec('cashSessions', closed)] });
+}
+
+async function createPayment(request, db, user) {
+    if (!can(user, 'gerant', 'caissier')) return fail(403, 'Seuls le caissier et le gerant peuvent encaisser');
+    const body = await readBody(request);
+    if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
+    const lines = Array.isArray(body.lines) ? body.lines : [];
+    if (lines.length < 1 || lines.length > 4) return fail(400, 'Indiquez entre 1 et 4 moyens de paiement');
+
+    const dup = await getRecord(db, 'payments', body.id + '-0');
+    if (dup) {
+        const order = await getRecord(db, 'orders', dup.obj.orderId);
+        return json({ duplicate: true, records: order ? [rec('orders', order.obj)] : [] });
+    }
+
+    const session = await openSessionOf(db, user.id);
+    if (!session) return fail(409, "Ouvrez votre caisse avant d'encaisser");
+    const order = await getRecord(db, 'orders', body.orderId);
+    if (!order) return fail(404, 'Commande introuvable');
+    const o = order.obj;
+    if (o.status === 'annulee') return fail(400, 'Cette commande est annulee');
+    const paid = o.paid || 0;
+    const remaining = o.total - paid;
+    if (remaining <= 0) return fail(409, 'Cette commande est deja payee');
+
+    let sum = 0;
+    for (const l of lines) {
+        if (!l || !PAYMENT_METHODS.has(l.method)) return fail(400, 'Mode de paiement invalide');
+        if (!isInt(l.amount, 1, 100000000)) return fail(400, 'Montant invalide');
+        if (l.received != null && (l.method !== 'especes' || !isInt(l.received, l.amount, 100000000))) {
+            return fail(400, 'Montant recu invalide');
+        }
+        sum += l.amount;
+    }
+    if (sum > remaining) return fail(400, `Le montant depasse le reste a payer (${remaining} FCFA)`);
+
+    const now = Date.now();
+    const iso = new Date(now).toISOString();
+    const payments = lines.map((l, i) => ({
+        id: `${body.id}-${i}`, groupId: body.id, orderId: o.id, orderNumber: o.number, tableId: o.tableId,
+        amount: l.amount, method: l.method,
+        received: l.received != null ? l.received : undefined,
+        change: l.received != null ? l.received - l.amount : undefined,
+        sessionId: session.obj.id, staffId: user.id, staffName: user.name, paidAt: iso
+    }));
+    const methods = [...new Set([...(o.paymentMethod ? o.paymentMethod.split('+') : []), ...lines.map(l => l.method)])];
+    const full = paid + sum >= o.total;
+    const newOrder = { ...o, paid: paid + sum, paymentMethod: methods.join('+'), status: full ? 'payee' : o.status };
+    if (full) newOrder.paidAt = iso;
+
+    const stmts = payments.map(p => guardedInsert(db, 'payments', p, now, 'orders', o.id, order.raw));
+    const out = [rec('orders', newOrder), ...payments.map(p => rec('payments', p))];
+    if (full && o.tableId) {
+        const other = await db.prepare(`SELECT 1 FROM records WHERE collection = 'orders' AND deleted = 0 AND id != ?
+            AND json_extract(data, '$.tableId') = ? AND json_extract(data, '$.status') IN ('en_cours', 'prete', 'servie') LIMIT 1`)
+            .bind(o.id, o.tableId).first();
+        const table = other ? null : await getRecord(db, 'tables', o.tableId);
+        if (table && table.obj.status !== 'libre') {
+            const freed = { ...table.obj, status: 'libre' };
+            stmts.push(db.prepare(`UPDATE records SET data = ?, updated_at = ? WHERE collection = 'tables' AND id = ?
+                AND EXISTS (SELECT 1 FROM records WHERE collection = 'orders' AND id = ? AND data = ?)`)
+                .bind(JSON.stringify(freed), now, freed.id, o.id, order.raw));
+            out.push(rec('tables', freed));
+        }
+    }
+    stmts.push(guardedUpdate(db, 'orders', newOrder, now, order.raw));
+
+    let results;
+    try {
+        results = await db.batch(stmts);
+    } catch (e) {
+        if (isUniqueError(e)) return fail(409, 'Paiement deja enregistre');
+        throw e;
+    }
+    if (!results[results.length - 1].meta.changes) return fail(409, CONFLICT);
+    await auditStmt(db, user, 'encaissement', 'payments', body.id, {
+        commande: o.number, montant: sum, modes: lines.map(l => `${l.method} ${l.amount}`).join(' + '),
+        reste: Math.max(0, o.total - paid - sum)
+    }).run();
+    return json({ ok: true, records: out });
+}
+
+async function createRefund(request, db, user) {
+    if (!can(user, 'gerant')) return fail(403, 'Seul le gerant peut effectuer un remboursement');
+    const body = await readBody(request);
+    if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
+    const dup = await getRecord(db, 'refunds', body.id);
+    if (dup) return json({ duplicate: true, records: [rec('refunds', dup.obj)] });
+
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    if (reason.length < 3 || reason.length > 200) return fail(400, 'Indiquez le motif du remboursement (3 a 200 caracteres)');
+    const payment = await getRecord(db, 'payments', body.paymentId);
+    if (!payment) return fail(404, 'Paiement introuvable');
+    const p = payment.obj;
+    const already = await db.prepare(`SELECT COALESCE(SUM(json_extract(data, '$.amount')), 0) AS s FROM records
+        WHERE collection = 'refunds' AND deleted = 0 AND json_extract(data, '$.paymentId') = ?`).bind(p.id).first();
+    const max = p.amount - already.s;
+    if (max <= 0) return fail(409, 'Ce paiement est deja entierement rembourse');
+    if (!isInt(body.amount, 1, max)) return fail(400, `Montant invalide (maximum ${max} FCFA)`);
+    const session = await openSessionOf(db, user.id);
+    if (p.method === 'especes' && !session) return fail(409, 'Ouvrez votre caisse pour rembourser en especes');
+    const order = await getRecord(db, 'orders', p.orderId);
+    if (!order) return fail(404, 'Commande introuvable');
+
+    const now = Date.now();
+    const refund = {
+        id: body.id, paymentId: p.id, orderId: p.orderId, orderNumber: p.orderNumber, amount: body.amount,
+        method: p.method, reason, sessionId: session ? session.obj.id : null,
+        staffId: user.id, staffName: user.name, at: new Date(now).toISOString()
+    };
+    const newOrder = { ...order.obj, refunded: (order.obj.refunded || 0) + body.amount };
+    let results;
+    try {
+        results = await db.batch([
+            guardedInsert(db, 'refunds', refund, now, 'orders', newOrder.id, order.raw),
+            guardedUpdate(db, 'orders', newOrder, now, order.raw)
+        ]);
+    } catch (e) {
+        if (isUniqueError(e)) return fail(409, 'Remboursement deja enregistre');
+        throw e;
+    }
+    if (!results[1].meta.changes) return fail(409, CONFLICT);
+    await auditStmt(db, user, 'remboursement', 'refunds', refund.id,
+        { commande: p.orderNumber, montant: refund.amount, mode: p.method, motif: reason }).run();
+    return json({ ok: true, records: [rec('refunds', refund), rec('orders', newOrder)] });
 }
 
 // ---------- STAFF ----------
@@ -481,6 +695,10 @@ async function handleApi(request, env, url) {
         if (route === '/sync' && method === 'GET') return await pull(url, db);
         if (route === '/sync' && method === 'POST') return await push(request, db, user);
         if (route === '/orders/next-number' && method === 'POST') return await nextOrderNumber(request, db, user);
+        if (route === '/cash/open' && method === 'POST') return await openCash(request, db, user);
+        if (route === '/cash/close' && method === 'POST') return await closeCash(request, db, user);
+        if (route === '/payments' && method === 'POST') return await createPayment(request, db, user);
+        if (route === '/refunds' && method === 'POST') return await createRefund(request, db, user);
 
         if (route === '/staff' && method === 'GET') {
             const { results } = await db.prepare('SELECT id, username, name, role FROM staff ORDER BY id').all();

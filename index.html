@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=20261017">
 </head>
 <body>
     <!-- LOGIN -->
@@ -369,6 +369,7 @@
 
         <!-- CAISSE -->
         <section class="page" id="page-caisse">
+            <div class="cash-session-bar" id="cashSessionBar"></div>
             <div class="caisse-summary">
                 <div class="caisse-summary-card">
                     <div class="label">A encaisser</div>
@@ -393,42 +394,109 @@
                         <p class="empty-state">Selectionnez une commande</p>
                     </div>
                     <div class="caisse-actions" id="caisseActions" style="display:none;">
-                        <div class="form-group">
-                            <label>Mode de paiement</label>
-                            <div class="payment-methods">
-                                <button class="payment-btn active" data-method="especes" onclick="App.caisse.setPayment('especes')">💵 Especes</button>
-                                <button class="payment-btn" data-method="mobile" onclick="App.caisse.setPayment('mobile')">📱 Mobile Money</button>
-                                <button class="payment-btn" data-method="carte" onclick="App.caisse.setPayment('carte')">💳 Carte</button>
-                            </div>
+                        <div class="pay-balance" id="payBalance"></div>
+                        <div id="payForm">
+                            <label class="pay-label">Paiement</label>
+                            <div class="pay-lines" id="payLines"></div>
+                            <button class="btn btn-small btn-secondary pay-add" id="payAddLine" onclick="App.caisse.addLine()">+ Ajouter un autre moyen de paiement</button>
+                            <div class="pay-summary" id="paySummary"></div>
+                            <button class="btn btn-primary btn-large" id="payButton" data-perm="payments.create" onclick="App.caisse.processPayment()">Encaisser</button>
                         </div>
-                        <div id="cashSection">
-                            <div class="form-group">
-                                <label>Montant recu (FCFA)</label>
-                                <input type="number" id="cashReceived" min="0" step="50" oninput="App.caisse.calcChange()">
-                            </div>
-                            <div class="change-display" id="changeDisplay">Monnaie: 0 FCFA</div>
+                        <div class="pay-prints">
+                            <button class="btn btn-secondary" onclick="App.tickets.bill(App.caisse.selectedOrderId)">Imprimer l'addition</button>
+                            <button class="btn btn-secondary" id="printReceiptBtn" onclick="App.tickets.receipt(App.caisse.selectedOrderId)">Imprimer le recu</button>
                         </div>
-                        <button class="btn btn-primary btn-large" data-perm="payments.create" onclick="App.caisse.processPayment()">Encaisser</button>
-                        <button class="btn btn-secondary" onclick="App.caisse.printTicket()">Imprimer ticket</button>
+                        <div class="pay-history" id="payHistory"></div>
                     </div>
                 </div>
             </div>
 
             <div class="panel" style="margin-top: 1.5rem;">
-                <h3 class="panel-title">Historique des paiements</h3>
-                <div class="panel-body">
+                <h3 class="panel-title">Operations du jour</h3>
+                <div class="panel-body table-scroll">
                     <table class="data-table" id="paymentsTable">
                         <thead>
                             <tr>
                                 <th>Heure</th>
                                 <th>Commande</th>
-                                <th>Table</th>
+                                <th>Operation</th>
                                 <th>Montant</th>
-                                <th>Paiement</th>
+                                <th>Mode</th>
+                                <th>Par</th>
+                                <th></th>
                             </tr>
                         </thead>
                         <tbody id="paymentsBody"></tbody>
                     </table>
+                </div>
+            </div>
+
+            <div class="panel" style="margin-top: 1.5rem;" data-perm="cash.history">
+                <h3 class="panel-title">Sessions de caisse</h3>
+                <div class="panel-body table-scroll">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Caissier</th>
+                                <th>Ouverture</th>
+                                <th>Cloture</th>
+                                <th>Attendu</th>
+                                <th>Compte</th>
+                                <th>Ecart</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="cashSessionsBody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="modal" id="modalCloseCash">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>Cloture de caisse</h3>
+                        <button class="modal-close" onclick="App.cash.closeModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="close-recap" id="closeRecap"></div>
+                        <div class="form-group">
+                            <label>Especes comptees dans le tiroir (FCFA)</label>
+                            <input type="number" id="closeCounted" min="0" step="25" inputmode="numeric" oninput="App.cash.updateDiff()">
+                        </div>
+                        <div class="close-diff" id="closeDiff"></div>
+                        <div class="form-group">
+                            <label>Commentaire (obligatoire en cas d'ecart)</label>
+                            <textarea id="closeNote" rows="2" maxlength="300" placeholder="Ex: billet de 500 manquant"></textarea>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" onclick="App.cash.closeModal()">Annuler</button>
+                        <button class="btn btn-primary" id="closeCashBtn" onclick="App.cash.close()">Cloturer la caisse</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal" id="modalRefund">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>Rembourser un paiement</h3>
+                        <button class="modal-close" onclick="App.caisse.closeRefund()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="refund-info" id="refundInfo"></p>
+                        <div class="form-group">
+                            <label>Montant a rembourser (FCFA)</label>
+                            <input type="number" id="refundAmount" min="1" step="25" inputmode="numeric">
+                        </div>
+                        <div class="form-group">
+                            <label>Motif (obligatoire)</label>
+                            <input type="text" id="refundReason" maxlength="200" placeholder="Ex: plat renvoye, erreur de saisie...">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" onclick="App.caisse.closeRefund()">Annuler</button>
+                        <button class="btn btn-danger" id="refundBtn" onclick="App.caisse.submitRefund()">Rembourser</button>
+                    </div>
                 </div>
             </div>
         </section>
@@ -556,6 +624,8 @@
         </div>
     </div>
 
-    <script src="app.js"></script>
+    <div id="printArea" aria-hidden="true"></div>
+
+    <script src="app.js?v=20261017"></script>
 </body>
 </html>
