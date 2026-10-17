@@ -1,6 +1,6 @@
 const COLLECTIONS = new Set(['tables', 'categories', 'menuItems', 'orders', 'payments', 'refunds', 'cashSessions']);
 const SERVER_ONLY = new Set(['payments', 'refunds', 'cashSessions']);
-const ORDER_SERVER_FIELDS = ['paid', 'refunded', 'paidAt', 'paymentMethod'];
+const ORDER_SERVER_FIELDS = ['paid', 'refunded', 'paidAt', 'paymentMethod', 'readyAt', 'servedAt'];
 const ACTIVE_ORDER = ['en_cours', 'prete', 'servie'];
 const ID_RE = /^[a-zA-Z0-9_-]{8,60}$/;
 const ROLES = new Set(['gerant', 'caissier', 'serveur', 'cuisinier']);
@@ -172,7 +172,7 @@ const ORDER_TRANSITIONS = {
     'prete>annulee': ['gerant', 'caissier'],
     'servie>annulee': ['gerant', 'caissier']
 };
-const ORDER_MUTABLE = new Set(['status']);
+const ORDER_MUTABLE = new Set(['status', 'startedAt']);
 
 const PHOTO_RE = /^data:image\/(jpeg|webp|png);base64,[A-Za-z0-9+/]+=*$/;
 const isShortText = (s, max) => typeof s === 'string' && s.trim().length > 0 && s.length <= max;
@@ -286,6 +286,11 @@ async function checkChange(c, ctx) {
                 return null;
             }
             if (!onlyChanged(ORDER_MUTABLE)) return 'Les articles et le total ne peuvent plus etre modifies';
+            if ('startedAt' in diff) {
+                if (!can(user, 'gerant', 'cuisinier')) return 'Seule la cuisine peut demarrer une commande';
+                if (before.status !== 'en_cours') return 'Cette commande a deja quitte la cuisine';
+            }
+            if (!('status' in diff)) return null;
             const roles = ORDER_TRANSITIONS[before.status + '>' + after.status];
             if (after.status === 'payee') return "Une commande passe a « payee » uniquement par l'encaissement";
             if (!roles) return `Passage de "${before.status}" a "${after.status}" impossible`;
@@ -369,6 +374,21 @@ async function push(request, db, user) {
     }
 
     const now = Date.now();
+    const iso = new Date(now).toISOString();
+    for (const c of accepted.values()) {
+        // Kitchen timings use the server clock so tablets with a wrong time cannot skew them.
+        if (c.collection !== 'orders' || !c.after) continue;
+        if (!c.before) delete c.after.startedAt;
+        else {
+            if (c.after.startedAt && !c.before.startedAt) c.after.startedAt = iso;
+            if (c.after.status !== c.before.status) {
+                if (c.after.status === 'prete') c.after.readyAt = iso;
+                if (c.after.status === 'servie') c.after.servedAt = iso;
+                if (c.after.status === 'en_cours') delete c.after.readyAt;
+            }
+        }
+        c.data = JSON.stringify(c.after);
+    }
     const stmts = [];
     for (const c of accepted.values()) {
         const diff = changedFields(c.before, c.after);

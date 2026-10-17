@@ -30,8 +30,10 @@ const App = {
             this.setupIconPicker();
             this.setupModals();
             this.setupKeyboard();
+            this.cuisine.init();
             this.uiReady = true;
         }
+        this.sync.restore();
         this.render();
         try {
             const me = await this.api('/me');
@@ -82,6 +84,19 @@ const App = {
         return res;
     },
 
+    // Waiters (and anyone not on the kitchen screen) hear and see when a dish is ready to be carried out.
+    onOrderEvents(events) {
+        if (!this.currentUser || document.body.classList.contains('kitchen-mode')) return;
+        if (!['serveur', 'gerant', 'caissier'].includes(this.currentUser.role)) return;
+        const ready = events.filter(e => e.to === 'prete' && e.from);
+        if (!ready.length) return;
+        ready.slice(0, 3).forEach(e => {
+            const t = this.data.tables.find(x => x.id === e.order.tableId);
+            this.toast(`Commande #${String(e.order.number).padStart(3, '0')} (${t ? 'table ' + t.number : 'a emporter'}) prete a servir`);
+        });
+        if (this.cuisine.sound) this.cuisine.playNotif(true);
+    },
+
     balance(o) {
         const paid = o.paid || 0;
         return { paid, refunded: o.refunded || 0, remaining: Math.max(0, o.total - paid) };
@@ -127,6 +142,7 @@ const App = {
 
     sync: {
         COLLECTIONS: ['tables', 'categories', 'menuItems', 'orders', 'payments', 'refunds', 'cashSessions'],
+        // synced[key] holds a hash of the last server-confirmed JSON, so pending local edits are whatever differs from it.
         synced: {},
         since: 0,
         ready: false,
@@ -134,6 +150,19 @@ const App = {
         busy: false,
         timer: null,
         pushTimer: null,
+        lastOk: 0,
+        lastTick: 0,
+        offlineSince: 0,
+        events: [],
+
+        h(s) {
+            let x = 0x811c9dc5;
+            for (let i = 0; i < s.length; i++) {
+                x ^= s.charCodeAt(i);
+                x = Math.imul(x, 0x01000193);
+            }
+            return (x >>> 0).toString(36) + '.' + s.length.toString(36);
+        },
 
         snapshot() {
             const m = {};
@@ -143,7 +172,28 @@ const App = {
             return m;
         },
 
-        apply(records) {
+        pendingCount() {
+            const now = this.snapshot();
+            let n = 0;
+            for (const [key, data] of Object.entries(now)) if (this.synced[key] !== this.h(data)) n++;
+            for (const key of Object.keys(this.synced)) if (!(key in now)) n++;
+            return n;
+        },
+
+        // Saved in the same localStorage entry as the data (see App.cacheData), so the two can never disagree.
+        cached: null,
+
+        // After a reload while offline, pending edits are still recognised and get sent when the network returns.
+        restore() {
+            const s = this.cached;
+            this.cached = null;
+            if (this.ready || !App.currentUser || !s || s.user !== App.currentUser.id || !s.synced) return;
+            this.synced = s.synced;
+            this.since = s.since || 0;
+            this.ready = true;
+        },
+
+        apply(records, silent) {
             let changed = false;
             for (const r of records) {
                 if (!this.COLLECTIONS.includes(r.collection)) continue;
@@ -153,10 +203,14 @@ const App = {
                 if (r.deleted) {
                     if (idx >= 0) { list.splice(idx, 1); changed = true; }
                     delete this.synced[key];
-                } else if (this.synced[key] !== r.data || idx < 0) {
+                } else if (this.synced[key] !== this.h(r.data) || idx < 0) {
                     const item = JSON.parse(r.data);
+                    const old = idx >= 0 ? list[idx] : null;
+                    if (!silent && r.collection === 'orders' && (!old || old.status !== item.status)) {
+                        this.events.push({ order: item, from: old ? old.status : null, to: item.status });
+                    }
                     if (idx >= 0) list[idx] = item; else list.push(item);
-                    this.synced[key] = r.data;
+                    this.synced[key] = this.h(r.data);
                     changed = true;
                 }
             }
@@ -170,7 +224,7 @@ const App = {
             // Base vide : on garde les donnees locales, elles seront envoyees au prochain push.
             if (res.records.length > 0) {
                 for (const c of this.COLLECTIONS) App.data[c] = [];
-                this.apply(res.records);
+                this.apply(res.records, true);
             }
             this.ready = true;
         },
@@ -179,7 +233,7 @@ const App = {
             const now = this.snapshot();
             const changes = [];
             for (const [key, data] of Object.entries(now)) {
-                if (this.synced[key] !== data) changes.push({ key, data });
+                if (this.synced[key] !== this.h(data)) changes.push({ key, data });
             }
             for (const key of Object.keys(this.synced)) {
                 if (!(key in now)) changes.push({ key, data: null });
@@ -203,13 +257,14 @@ const App = {
                 if (res.rejected && res.rejected.length) App.toast(res.rejected[0].error, 'error');
                 for (const c of chunk) {
                     if (rejected.has(c.key)) continue;
-                    if (c.data === null) delete this.synced[c.key]; else this.synced[c.key] = c.data;
+                    if (c.data === null) delete this.synced[c.key]; else this.synced[c.key] = this.h(c.data);
                 }
             }
             if (reverted) {
                 App.cacheData();
                 App.render();
             }
+            return changes.length > 0;
         },
 
         revert(r) {
@@ -222,23 +277,27 @@ const App = {
             } else {
                 const item = JSON.parse(r.data);
                 if (idx >= 0) list[idx] = item; else list.push(item);
-                this.synced[key] = r.data;
+                this.synced[key] = this.h(r.data);
             }
         },
 
         async tick() {
             if (this.busy || !App.currentUser) return;
             this.busy = true;
+            this.lastTick = Date.now();
             try {
-                if (!this.ready) await this.initial();
-                await this.push();
+                const fresh = !this.ready;
+                if (fresh) await this.initial();
+                const pushed = (await this.push()) || fresh;
                 const res = await App.api('/sync?since=' + this.since);
                 this.since = res.now - 5000;
-                if (this.apply(res.records)) {
-                    App.cacheData();
-                    App.render();
-                }
+                const changed = this.apply(res.records);
+                if (changed) App.render();
+                if (changed || pushed) App.cacheData();
+                this.lastOk = Date.now();
                 this.setOnline(true);
+                const events = this.events.splice(0);
+                if (events.length) App.onOrderEvents(events);
             } catch (e) {
                 if (!e.status) this.setOnline(false);
             } finally {
@@ -254,12 +313,21 @@ const App = {
         setOnline(online) {
             if (online === this.online) return;
             this.online = online;
+            this.offlineSince = online ? 0 : Date.now();
             App.toast(online ? 'Connexion retablie' : 'Connexion perdue : modifications en attente', online ? 'success' : 'error');
         },
 
+        // Every 4 s while visible; a background tab only checks every 30 s to save requests (free plan quota).
         start() {
             this.stop();
-            this.timer = setInterval(() => this.tick(), 4000);
+            this.timer = setInterval(() => {
+                if (document.hidden && Date.now() - this.lastTick < 30000) return;
+                this.tick();
+            }, 4000);
+            if (!this.visHandler) {
+                this.visHandler = () => { if (!document.hidden && this.timer) this.tick(); };
+                document.addEventListener('visibilitychange', this.visHandler);
+            }
         },
 
         stop() {
@@ -274,6 +342,10 @@ const App = {
             this.since = 0;
             this.ready = false;
             this.online = true;
+            this.offlineSince = 0;
+            this.lastOk = 0;
+            this.events = [];
+            this.cached = null;
         }
     },
 
@@ -318,12 +390,20 @@ const App = {
         const saved = localStorage.getItem('restoManagerData');
         if (saved) {
             const parsed = JSON.parse(saved);
+            this.sync.cached = parsed.__sync || null;
+            delete parsed.__sync;
             Object.assign(this.data, parsed);
         }
     },
 
     cacheData() {
-        localStorage.setItem('restoManagerData', JSON.stringify(this.data));
+        const payload = { ...this.data };
+        if (this.sync.ready && this.currentUser) {
+            payload.__sync = { user: this.currentUser.id, since: this.sync.since, synced: this.sync.synced };
+        }
+        try {
+            localStorage.setItem('restoManagerData', JSON.stringify(payload));
+        } catch (e) { /* stockage plein : les donnees restent en memoire et sur le serveur */ }
     },
 
     saveData() {
@@ -749,6 +829,7 @@ const App = {
         'tables.manage': ['gerant'],
         'menu.manage': ['gerant'],
         'menu.availability': ['gerant', 'cuisinier'],
+        'kitchen.start': ['gerant', 'cuisinier'],
         'orders.create': ['gerant', 'caissier', 'serveur'],
         'orders.ready': ['gerant', 'cuisinier', 'serveur'],
         'orders.serve': ['gerant', 'caissier', 'serveur'],
@@ -769,7 +850,9 @@ const App = {
         });
         const active = document.querySelector('.nav-item.active');
         if (this.currentUser && active && !this.can('page.' + active.dataset.page)) {
-            const first = [...document.querySelectorAll('.nav-item')].find(n => this.can('page.' + n.dataset.page));
+            const first = this.currentUser.role === 'cuisinier'
+                ? document.querySelector('.nav-item[data-page="cuisine"]')
+                : [...document.querySelectorAll('.nav-item')].find(n => this.can('page.' + n.dataset.page));
             if (first) this.navigateTo(first.dataset.page);
         }
     },
@@ -952,6 +1035,13 @@ const App = {
                 level: 'critical', page: 'cuisine',
                 title: `${late.length} commande(s) en cuisine depuis plus de ${this.KITCHEN_LATE_MIN} min`,
                 detail: late.slice(0, 4).map(o => `${num(o)} ${tableOf(o)} · ${mins(o.createdAt)} min`).join(' — ')
+            });
+
+            const waiting = App.data.orders.filter(o => o.status === 'prete' && o.readyAt && mins(o.readyAt) >= 5);
+            if (waiting.length) alerts.push({
+                level: 'serious', page: 'cuisine',
+                title: `${waiting.length} commande(s) prete(s) non servie(s) depuis plus de 5 min`,
+                detail: waiting.slice(0, 4).map(o => `${num(o)} ${tableOf(o)} · ${mins(o.readyAt)} min`).join(' — ')
             });
 
             const bills = App.data.orders.filter(o => o.status === 'servie' && App.balance(o).remaining > 0 && mins(o.createdAt) >= this.BILL_LATE_MIN);
@@ -2622,72 +2712,223 @@ const App = {
 
     // CUISINE
     cuisine: {
-        _lastCount: 0,
+        seen: null,
+        flash: {},
+        sound: true,
+        audioCtx: null,
+        wakeLock: null,
+        ticker: null,
+        LATE_MIN: 20,
+        WARN_MIN: 10,
+
+        init() {
+            try { this.sound = localStorage.getItem('sissiman-kitchen-sound') !== '0'; } catch (e) { /* stockage indisponible */ }
+            this.updateSoundBtn();
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden && document.body.classList.contains('kitchen-mode')) this.requestWakeLock();
+            });
+            let remembered = false;
+            try { remembered = localStorage.getItem('sissiman-kitchen-mode') === '1'; } catch (e) { /* stockage indisponible */ }
+            if (remembered && App.can('page.cuisine')) this.enterKitchenMode(false);
+        },
+
+        isActive() {
+            return document.getElementById('page-cuisine').classList.contains('active');
+        },
 
         render() {
-            const orders = App.data.orders.filter(o => o.status === 'en_cours' || o.status === 'prete');
-            const enCours = orders.filter(o => o.status === 'en_cours');
-            const pretes = orders.filter(o => o.status === 'prete');
-
-            document.getElementById('cuisineEnCours').textContent = enCours.length;
-            document.getElementById('cuisinePretes').textContent = pretes.length;
-
-            if (enCours.length > this._lastCount) this.playNotif();
-            this._lastCount = enCours.length;
-
-            const grid = document.getElementById('cuisineGrid');
-            if (orders.length === 0) {
-                grid.innerHTML = '<p class="empty-state">Aucune commande en attente</p>';
-                return;
-            }
-
             const now = Date.now();
-            grid.innerHTML = orders.map(o => {
-                const table = App.data.tables.find(t => t.id === o.tableId);
-                const mins = Math.floor((now - new Date(o.createdAt).getTime()) / 60000);
-                const urgent = mins >= 15;
-                return `<div class="cuisine-ticket">
-                    <div class="cuisine-ticket-header">
-                        <div>
-                            <span class="order-num">#${String(o.number).padStart(3, '0')}</span>
-                            <span class="table-num"> — Table ${table ? table.number : '?'}</span>
-                        </div>
-                        <span class="cuisine-ticket-timer ${urgent ? 'urgent' : ''}">${mins} min</span>
+            const orders = App.data.orders
+                .filter(o => o.status === 'en_cours' || o.status === 'prete')
+                .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+            const fresh = orders.filter(o => o.status === 'en_cours' && !o.startedAt);
+            const prep = orders.filter(o => o.status === 'en_cours' && o.startedAt);
+            const ready = orders.filter(o => o.status === 'prete')
+                .sort((a, b) => (a.readyAt || a.createdAt).localeCompare(b.readyAt || b.createdAt));
+
+            // A new order, or new lines on an existing one, rings once and stays highlighted for a while.
+            const keys = orders.filter(o => o.status === 'en_cours').map(o => o.id + ':' + o.items.length);
+            if (this.seen) {
+                const arrivals = keys.filter(k => !this.seen.has(k));
+                if (arrivals.length) {
+                    arrivals.forEach(k => { this.flash[k.split(':')[0]] = now + 20000; });
+                    if (this.sound && (this.isActive() || document.body.classList.contains('kitchen-mode'))) this.playNotif();
+                }
+            }
+            this.seen = new Set(keys);
+
+            document.getElementById('cuisineNew').textContent = fresh.length;
+            document.getElementById('cuisinePrep').textContent = prep.length;
+            document.getElementById('cuisineReady').textContent = ready.length;
+
+            const col = (title, cls, list, empty) => `<section class="kcol ${cls}">
+                <h3 class="kcol-title">${title} <span>${list.length}</span></h3>
+                <div class="kcol-list">${list.length ? list.map(o => this.card(o, now)).join('') : `<p class="kcol-empty">${empty}</p>`}</div>
+            </section>`;
+            document.getElementById('cuisineBoard').innerHTML =
+                col('Nouvelles', 'k-new', fresh, 'Aucune nouvelle commande') +
+                col('En preparation', 'k-prep', prep, 'Rien en preparation') +
+                col('Pretes a servir', 'k-ready', ready, 'Aucune commande en attente du serveur');
+            this.renderStatus();
+            this.ensureTicker();
+        },
+
+        card(o, now) {
+            const table = App.data.tables.find(t => t.id === o.tableId);
+            const mins = iso => Math.max(0, Math.floor((now - new Date(iso).getTime()) / 60000));
+            const age = mins(o.createdAt);
+            const level = o.status === 'prete' ? 'ok' : age >= this.LATE_MIN ? 'late' : age >= this.WARN_MIN ? 'warn' : 'ok';
+            const received = new Date(o.createdAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+            const flashing = this.flash[o.id] && this.flash[o.id] > now;
+            const num = '#' + String(o.number).padStart(3, '0');
+            let timer, actions;
+            if (o.status === 'prete') {
+                timer = `<span class="ktimer ${o.readyAt && mins(o.readyAt) >= 5 ? 'warn' : 'ok'}">Prete depuis ${mins(o.readyAt || o.createdAt)} min</span>`;
+                actions = App.can('orders.serve')
+                    ? `<button class="kbtn kbtn-serve" onclick="App.orders.updateStatus('${o.id}','servie')">SERVIE</button>`
+                    : '<span class="kwait">En attente du serveur</span>';
+            } else {
+                timer = `<span class="ktimer ${level}">${age} min</span>`;
+                const ready = App.can('orders.ready') ? `<button class="kbtn kbtn-ready" onclick="App.cuisine.markReady('${o.id}')">COMMANDE PRETE</button>` : '';
+                actions = !o.startedAt && App.can('kitchen.start')
+                    ? `<button class="kbtn kbtn-start" onclick="App.cuisine.start('${o.id}')">COMMENCER</button>${ready.replace('kbtn-ready', 'kbtn-ready secondary').replace('COMMANDE PRETE', 'PRETE')}`
+                    : ready;
+            }
+            return `<article class="kcard ${level} ${flashing ? 'flash' : ''}" aria-label="Commande ${num}, ${table ? 'table ' + table.number : 'a emporter'}">
+                <header class="kcard-head">
+                    <div>
+                        <div class="kcard-num">${num} <span>${table ? 'TABLE ' + table.number : 'A EMPORTER'}</span></div>
+                        <div class="kcard-meta">Recue a ${App.esc(received)}${o.covers ? ` · ${o.covers} couvert(s)` : ''}</div>
                     </div>
-                    <div class="cuisine-ticket-items">
-                        ${o.items.map(it => `<div class="cuisine-ticket-item ${it.addedAt ? 'added' : ''}"><span><span class="qty">${it.qty}x</span> ${App.esc(it.name)}${it.addedAt ? ' <span class="added-badge">AJOUT</span>' : ''}${App.itemDetailHtml(it)}</span></div>`).join('')}
-                    </div>
-                    ${o.note ? `<div class="cuisine-ticket-note">${App.esc(o.note)}</div>` : ''}
-                    <div class="cuisine-ticket-actions">
-                        ${o.status === 'en_cours' && App.can('orders.ready') ? `<button class="btn btn-primary" onclick="App.cuisine.markReady('${o.id}')">Pret !</button>` : ''}
-                        ${o.status === 'prete' && App.can('orders.serve') ? `<button class="btn btn-success" onclick="App.orders.updateStatus('${o.id}','servie')">Servie</button>` : ''}
-                        <button class="btn btn-secondary" title="Imprimer le ticket cuisine" onclick="App.tickets.kitchen('${o.id}')">Imprimer</button>
-                    </div>
-                </div>`;
-            }).join('');
+                    ${timer}
+                </header>
+                <ul class="kcard-items">
+                    ${o.items.map(it => `<li class="${it.addedAt ? 'added' : ''}">
+                        <span class="kqty">${it.qty}</span>
+                        <span class="kname">${App.esc(it.name)}${it.addedAt ? ' <span class="added-badge">AJOUT</span>' : ''}${App.itemDetailHtml(it)}</span>
+                    </li>`).join('')}
+                </ul>
+                ${o.note ? `<div class="kcard-note">${App.esc(o.note)}</div>` : ''}
+                <footer class="kcard-actions">
+                    ${actions}
+                    <button class="kbtn-icon" title="Imprimer le ticket cuisine" aria-label="Imprimer le ticket cuisine" onclick="App.tickets.kitchen('${o.id}')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+                    </button>
+                </footer>
+            </article>`;
+        },
+
+        start(id) {
+            const o = App.data.orders.find(x => x.id === id);
+            if (!o || o.status !== 'en_cours' || o.startedAt) return;
+            o.startedAt = new Date().toISOString();
+            App.saveData();
+            App.render();
         },
 
         markReady(id) {
             App.orders.updateStatus(id, 'prete');
-            App.toast('Commande prete a servir !');
+            App.toast('Commande prete : le serveur est prevenu');
         },
 
-        playNotif() {
+        // Re-render every 15 s so timers move, and refresh the connection line every second.
+        ensureTicker() {
+            if (this.ticker) return;
+            let n = 0;
+            this.ticker = setInterval(() => {
+                if (!this.isActive()) return;
+                document.getElementById('kitchenClock').textContent = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+                this.renderStatus();
+                if (++n % 15 === 0) this.render();
+            }, 1000);
+        },
+
+        renderStatus() {
+            const el = document.getElementById('kitchenConn');
+            document.getElementById('kitchenClock').textContent = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+            const s = App.sync;
+            const pending = s.pendingCount();
+            const since = s.lastOk ? Math.round((Date.now() - s.lastOk) / 1000) : null;
+            if (!s.online) {
+                const down = s.offlineSince ? Math.max(1, Math.round((Date.now() - s.offlineSince) / 60000)) : 1;
+                el.className = 'kitchen-conn offline';
+                el.textContent = `Hors ligne depuis ${down} min : les nouvelles commandes n'arrivent plus.` +
+                    (pending ? ` ${pending} action(s) seront envoyees au retour du reseau.` : '');
+            } else {
+                el.className = 'kitchen-conn online';
+                el.textContent = since === null ? 'Connexion...' : `En ligne · mis a jour il y a ${since} s` + (pending ? ` · ${pending} envoi(s) en cours` : '');
+            }
+        },
+
+        async enterKitchenMode(fromClick) {
+            document.body.classList.add('kitchen-mode');
+            if (!this.isActive()) App.navigateTo('cuisine');
+            try { localStorage.setItem('sissiman-kitchen-mode', '1'); } catch (e) { /* stockage indisponible */ }
+            if (fromClick) {
+                this.unlockAudio();
+                try { if (!document.fullscreenElement) await document.documentElement.requestFullscreen(); } catch (e) { /* plein ecran refuse */ }
+            }
+            this.requestWakeLock();
+            this.render();
+        },
+
+        async exitKitchenMode() {
+            document.body.classList.remove('kitchen-mode');
+            try { localStorage.setItem('sissiman-kitchen-mode', '0'); } catch (e) { /* stockage indisponible */ }
+            try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (e) { /* ignore */ }
+            if (this.wakeLock) { try { await this.wakeLock.release(); } catch (e) { /* ignore */ } this.wakeLock = null; }
+        },
+
+        // Keeps a wall-mounted tablet from going to sleep while the kitchen screen is shown.
+        async requestWakeLock() {
+            if (!('wakeLock' in navigator) || this.wakeLock) return;
             try {
-                const ctx = new (window.AudioContext || window.webkitAudioContext)();
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.type = 'sine';
-                osc.frequency.setValueAtTime(880, ctx.currentTime);
-                osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
-                osc.frequency.setValueAtTime(880, ctx.currentTime + 0.2);
-                gain.gain.setValueAtTime(0.3, ctx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
-                osc.start(ctx.currentTime);
-                osc.stop(ctx.currentTime + 0.4);
-            } catch(e) {}
+                this.wakeLock = await navigator.wakeLock.request('screen');
+                this.wakeLock.addEventListener('release', () => { this.wakeLock = null; });
+            } catch (e) { /* refuse par le navigateur */ }
+        },
+
+        toggleSound() {
+            this.sound = !this.sound;
+            try { localStorage.setItem('sissiman-kitchen-sound', this.sound ? '1' : '0'); } catch (e) { /* stockage indisponible */ }
+            this.updateSoundBtn();
+            if (this.sound) { this.unlockAudio(); this.playNotif(); }
+        },
+
+        updateSoundBtn() {
+            const b = document.getElementById('kitchenSoundBtn');
+            if (!b) return;
+            b.textContent = this.sound ? 'Son : active' : 'Son : coupe';
+            b.setAttribute('aria-pressed', this.sound ? 'true' : 'false');
+        },
+
+        // Browsers only allow audio after a user gesture; creating the context on a click keeps later beeps working.
+        unlockAudio() {
+            try {
+                if (!this.audioCtx) this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
+            } catch (e) { /* audio indisponible */ }
+        },
+
+        playNotif(soft) {
+            try {
+                if (!this.audioCtx) this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const ctx = this.audioCtx;
+                const notes = soft ? [660, 880] : [880, 1100, 880, 1100];
+                notes.forEach((f, i) => {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.type = 'sine';
+                    const t = ctx.currentTime + i * 0.18;
+                    osc.frequency.setValueAtTime(f, t);
+                    gain.gain.setValueAtTime(soft ? 0.15 : 0.3, t);
+                    gain.gain.exponentialRampToValueAtTime(0.01, t + 0.16);
+                    osc.start(t);
+                    osc.stop(t + 0.17);
+                });
+            } catch (e) { /* audio indisponible */ }
         }
     },
 

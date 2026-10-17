@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=20261017c">
+    <link rel="stylesheet" href="styles.css?v=20261017e">
 </head>
 <body>
     <!-- LOGIN -->
@@ -492,21 +492,23 @@
 
         <!-- CUISINE -->
         <section class="page" id="page-cuisine">
-            <div class="cuisine-header">
-                <div class="cuisine-stats">
-                    <div class="cuisine-stat">
-                        <span class="cuisine-stat-value" id="cuisineEnCours">0</span>
-                        <span class="cuisine-stat-label">En preparation</span>
-                    </div>
-                    <div class="cuisine-stat">
-                        <span class="cuisine-stat-value" id="cuisinePretes">0</span>
-                        <span class="cuisine-stat-label">Pretes a servir</span>
-                    </div>
+            <div class="kitchen-bar">
+                <div class="kitchen-bar-left">
+                    <strong class="kitchen-clock" id="kitchenClock">--:--</strong>
+                    <span class="kitchen-conn" id="kitchenConn" role="status" aria-live="polite"></span>
+                </div>
+                <div class="kitchen-counts">
+                    <span class="kc-new"><b id="cuisineNew">0</b> nouvelle(s)</span>
+                    <span class="kc-prep"><b id="cuisinePrep">0</b> en preparation</span>
+                    <span class="kc-ready"><b id="cuisineReady">0</b> prete(s)</span>
+                </div>
+                <div class="kitchen-bar-actions">
+                    <button class="btn btn-secondary" id="kitchenSoundBtn" onclick="App.cuisine.toggleSound()" aria-pressed="true">Son : active</button>
+                    <button class="btn btn-primary kitchen-enter" onclick="App.cuisine.enterKitchenMode(true)">Mode ecran cuisine</button>
+                    <button class="btn btn-secondary kitchen-exit" onclick="App.cuisine.exitKitchenMode()">Quitter l'ecran cuisine</button>
                 </div>
             </div>
-            <div class="cuisine-grid" id="cuisineGrid">
-                <p class="empty-state">Aucune commande en attente</p>
-            </div>
+            <div class="kitchen-board" id="cuisineBoard"></div>
         </section>
 
         <!-- RAPPORTS -->
@@ -677,6 +679,6 @@
 
     <div id="printArea" aria-hidden="true"></div>
 
-    <script src="app.js?v=20261017c"></script>
+    <script src="app.js?v=20261017e"></script>
 </body>
 </html>
