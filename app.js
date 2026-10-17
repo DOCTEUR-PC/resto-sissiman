@@ -87,6 +87,24 @@ const App = {
         return { paid, refunded: o.refunded || 0, remaining: Math.max(0, o.total - paid) };
     },
 
+    lineTotal(it) {
+        return (it.unitPrice != null ? it.unitPrice : it.price) * it.qty;
+    },
+
+    itemDetails(it) {
+        const d = [];
+        if (it.side) d.push(it.side);
+        (it.extras || []).forEach(e => d.push('+ ' + e.name));
+        (it.prefs || []).forEach(p => d.push(p));
+        if (it.comment) d.push('« ' + it.comment + ' »');
+        return d;
+    },
+
+    itemDetailHtml(it) {
+        const d = this.itemDetails(it);
+        return d.length ? `<span class="item-opts">${this.esc(d.join(' · '))}</span>` : '';
+    },
+
     refundedOf(paymentId) {
         return this.data.refunds.filter(r => r.paymentId === paymentId).reduce((s, r) => s + r.amount, 0);
     },
@@ -288,7 +306,9 @@ const App = {
     setupKeyboard() {
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
-                document.querySelectorAll('.modal.open:not([data-locked="true"])').forEach(m => m.classList.remove('open'));
+                const openModals = document.querySelectorAll('.modal.open:not([data-locked="true"])');
+                if (!openModals.length && this.pos.isOpen()) this.pos.close();
+                openModals.forEach(m => m.classList.remove('open'));
             }
         });
     },
@@ -594,6 +614,7 @@ const App = {
             localStorage.removeItem('sissiman-user');
             localStorage.removeItem('sissiman-token');
             App.password.close(true);
+            if (App.pos.isOpen()) App.pos.close(true);
         },
 
         showLogin() {
@@ -711,6 +732,7 @@ const App = {
         this.cuisine.render();
         this.rapports.render();
         this.personnel.render();
+        this.pos.render();
         this.updateBadge();
     },
 
@@ -1141,7 +1163,7 @@ const App = {
             App.data.orders.filter(o => o.status !== 'annulee' && new Date(o.createdAt).getTime() >= today).forEach(o => o.items.forEach(it => {
                 const a = agg[it.name] || (agg[it.name] = { qty: 0, amount: 0 });
                 a.qty += it.qty;
-                a.amount += it.qty * it.price;
+                a.amount += App.lineTotal(it);
             }));
             const top = Object.entries(agg).sort((a, b) => b[1].qty - a[1].qty || b[1].amount - a[1].amount).slice(0, 6);
             if (!top.length) {
@@ -1244,7 +1266,7 @@ const App = {
                         <span class="seats-icon">${t.seats} places</span>
                         <span>${App.esc(locationLabels[t.location] || t.location)}</span>
                     </div>
-                    <div class="table-main-action">${mainBtn}</div>
+                    <div class="table-main-action">${App.can('orders.create') ? `<button class="btn btn-small btn-primary" onclick="event.stopPropagation(); App.pos.open('${t.id}')">Commander</button>` : ''}${mainBtn}</div>
                     <div class="table-actions">
                         ${t.status === 'libre' ? `<button class="btn-icon btn-warning" title="Reserver" onclick="event.stopPropagation(); App.tables.setStatus('${t.id}','reservee')"><svg viewBox="0 0 24 24"><path d="M19 4H5a2 2 0 00-2 2v14l4-4h12a2 2 0 002-2V6a2 2 0 00-2-2z"/></svg></button>` : ''}
                         ${App.can('tables.manage') ? `<button class="btn-icon btn-secondary" title="Modifier" onclick="event.stopPropagation(); App.tables.edit('${t.id}')"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
@@ -1340,7 +1362,7 @@ const App = {
             list.innerHTML = orders.map(o => {
                 const table = App.data.tables.find(t => t.id === o.tableId);
                 const time = new Date(o.createdAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-                const itemsText = o.items.map(it => `${it.qty}x ${App.esc(it.name)}`).join(', ');
+                const itemsText = o.items.map(it => `${it.qty}x ${App.esc(it.name)}${App.itemDetails(it).length ? ` <small>(${App.esc(App.itemDetails(it).join(', '))})</small>` : ''}`).join(', ');
                 return `<div class="order-card">
                     <span class="order-id">#${String(o.number).padStart(3, '0')}</span>
                     <span class="order-table-badge">T${table ? table.number : '?'}</span>
@@ -1348,6 +1370,7 @@ const App = {
                     <span class="order-amount">${App.fmt(o.total)}</span>
                     <span class="order-status ${App.esc(o.status)}">${App.esc(o.status.replace('_', ' '))}</span>
                     <div class="order-actions">
+                        ${['en_cours', 'prete', 'servie'].includes(o.status) && App.can('orders.create') ? `<button class="btn btn-small btn-secondary" onclick="App.pos.open('${o.tableId}', '${o.id}')">+ Ajouter</button>` : ''}
                         ${o.status === 'en_cours' && App.can('orders.ready') ? `<button class="btn btn-small btn-warning" onclick="App.orders.updateStatus('${o.id}','prete')">Prete</button>` : ''}
                         ${o.status === 'prete' && App.can('orders.serve') ? `<button class="btn btn-small btn-success" onclick="App.orders.updateStatus('${o.id}','servie')">Servir</button>` : ''}
                         ${o.status !== 'payee' && o.status !== 'annulee' && App.can('orders.cancel') ? `<button class="btn btn-small btn-danger" onclick="App.orders.updateStatus('${o.id}','annulee')">Annuler</button>` : ''}
@@ -1376,155 +1399,443 @@ const App = {
         },
 
         openNewOrder() {
-            this.currentItems = [];
-            this.searchQuery = '';
-            document.getElementById('orderCovers').value = 1;
-            document.getElementById('orderNote').value = '';
+            App.pos.open();
+        }
+    },
 
-            const select = document.getElementById('orderTable');
-            select.innerHTML = App.data.tables.map(t =>
-                `<option value="${t.id}">Table ${t.number} (${t.seats}p - ${App.esc(t.location)}) ${t.status !== 'libre' ? '[' + App.esc(t.status) + ']' : ''}</option>`
-            ).join('');
+    pos: {
+        tableId: null,
+        takeaway: false,
+        targetOrderId: null,
+        forceNew: false,
+        lines: [],
+        covers: 1,
+        cat: 'all',
+        query: '',
+        pendingId: null,
+        pendingNumber: null,
+        sending: false,
+        opt: null,
+        ACTIVE: ['en_cours', 'prete', 'servie'],
 
-            const searchEl = document.getElementById('orderSearch');
-            if (searchEl) searchEl.value = '';
-
-            this.renderOrderMenuCategories();
-            this.renderOrderItems();
-            document.getElementById('modalOrder').classList.add('open');
-        },
-
-        searchMenu(query) {
-            this.searchQuery = query.toLowerCase();
-            this.filterMenuItems(this._currentMenuCat || 'all');
-        },
-
-        renderOrderMenuCategories() {
-            const container = document.getElementById('orderMenuCategories');
-            container.innerHTML = `<button class="menu-cat-btn active" onclick="App.orders.filterMenuItems('all', event)">Tout</button>` +
-                App.data.categories.map(c =>
-                    `<button class="menu-cat-btn" onclick="App.orders.filterMenuItems('${c.id}', event)">${c.icon} ${c.name}</button>`
-                ).join('');
-            this.filterMenuItems('all');
-        },
-
-        filterMenuItems(catId, e) {
-            this._currentMenuCat = catId;
-            document.querySelectorAll('#orderMenuCategories .menu-cat-btn').forEach(b => b.classList.remove('active'));
-            if (e) e.target.classList.add('active');
-            else document.querySelector('#orderMenuCategories .menu-cat-btn')?.classList.add('active');
-
-            let items = catId === 'all' ? App.data.menuItems : App.data.menuItems.filter(m => m.category === catId);
-            if (this.searchQuery) {
-                items = items.filter(m => m.name.toLowerCase().includes(this.searchQuery));
+        open(tableId, orderId) {
+            if (!App.can('orders.create')) return;
+            this.lines = [];
+            this.covers = 1;
+            this.cat = 'all';
+            this.query = '';
+            this.forceNew = false;
+            this.takeaway = false;
+            this.targetOrderId = orderId || null;
+            this.pendingId = App.genId();
+            this.pendingNumber = null;
+            this.tableId = tableId || null;
+            if (orderId) {
+                const o = App.data.orders.find(x => x.id === orderId);
+                if (o && !o.tableId) this.takeaway = true;
             }
-            const container = document.getElementById('orderMenuItems');
-            if (items.length === 0) {
-                container.innerHTML = '<p class="empty-state" style="padding:1rem">Aucun resultat</p>';
+            const existing = this.target();
+            if (existing) this.covers = existing.covers || 1;
+            document.getElementById('posNote').value = '';
+            document.getElementById('posSearch').value = '';
+            let print = false;
+            try { print = localStorage.getItem('sissiman-print-kitchen') === '1'; } catch (e) { /* stockage indisponible */ }
+            document.getElementById('posPrintKitchen').checked = print;
+            document.getElementById('pos').hidden = false;
+            document.body.classList.add('pos-open');
+            this.render();
+        },
+
+        close(force) {
+            if (!force && this.lines.length && !confirm('Abandonner cette commande ? Les articles du panier seront perdus.')) return;
+            document.getElementById('pos').hidden = true;
+            document.body.classList.remove('pos-open');
+            this.toggleCart(false);
+            this.closeOptions();
+        },
+
+        isOpen() {
+            return !document.getElementById('pos').hidden;
+        },
+
+        openOrderFor(tableId) {
+            return App.data.orders
+                .filter(o => o.tableId === tableId && this.ACTIVE.includes(o.status))
+                .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] || null;
+        },
+
+        target() {
+            if (this.forceNew) return null;
+            if (this.targetOrderId) {
+                const o = App.data.orders.find(x => x.id === this.targetOrderId);
+                return o && this.ACTIVE.includes(o.status) ? o : null;
+            }
+            return this.tableId ? this.openOrderFor(this.tableId) : null;
+        },
+
+        render() {
+            if (!this.isOpen()) return;
+            this.renderTables();
+            this.renderCats();
+            this.renderGrid();
+            this.renderCart();
+        },
+
+        renderTables() {
+            const chip = (id, label, cls, badge, selected) => `<button class="pos-table ${cls} ${selected ? 'selected' : ''}" role="option" aria-selected="${selected}"
+                onclick="App.pos.selectTable(${id === null ? 'null' : `'${id}'`})">${label}${badge ? `<small>${badge}</small>` : ''}</button>`;
+            const tables = [...App.data.tables].sort((a, b) => a.number - b.number);
+            document.getElementById('posTables').innerHTML =
+                chip(null, 'A emporter', 'takeaway', '', this.takeaway) +
+                tables.map(t => {
+                    const o = this.openOrderFor(t.id);
+                    return chip(t.id, 'T' + t.number, App.esc(t.status), o ? '#' + String(o.number).padStart(3, '0') : '', !this.takeaway && this.tableId === t.id);
+                }).join('');
+
+            const target = this.target();
+            const table = App.data.tables.find(t => t.id === this.tableId);
+            const where = this.takeaway ? 'A emporter' : table ? `Table ${table.number} · ${table.seats} places` : 'Choisissez une table';
+            document.getElementById('posTitle').textContent = target
+                ? `Ajout a la commande #${String(target.number).padStart(3, '0')}` : 'Nouvelle commande';
+            document.getElementById('posSubtitle').textContent = target ? `${where} · deja ${App.fmt(target.total)}` : where;
+        },
+
+        selectTable(id) {
+            this.takeaway = id === null;
+            this.tableId = id;
+            this.targetOrderId = null;
+            this.forceNew = false;
+            const o = this.target();
+            if (o) this.covers = o.covers || 1;
+            this.render();
+        },
+
+        renderCats() {
+            const cats = [{ id: 'all', name: 'Tout', icon: '' }, ...App.data.categories];
+            document.getElementById('posCats').innerHTML = cats.map(c =>
+                `<button class="pos-cat ${this.cat === c.id ? 'active' : ''}" onclick="App.pos.setCat('${c.id}')">${App.esc(c.icon || '')} ${App.esc(c.name)}</button>`).join('');
+        },
+
+        setCat(id) {
+            this.cat = id;
+            this.renderCats();
+            this.renderGrid();
+        },
+
+        search(q) {
+            this.query = q.trim().toLowerCase();
+            this.renderGrid();
+        },
+
+        hasOptions(m) {
+            const o = m.options || {};
+            return !!((o.sides && o.sides.length) || (o.extras && o.extras.length) || (o.prefs && o.prefs.length));
+        },
+
+        renderGrid() {
+            let items = this.cat === 'all' ? App.data.menuItems : App.data.menuItems.filter(m => m.category === this.cat);
+            if (this.query) items = items.filter(m => m.name.toLowerCase().includes(this.query));
+            items = [...items].sort((a, b) => (b.available !== false) - (a.available !== false));
+            const grid = document.getElementById('posGrid');
+            if (!items.length) {
+                grid.innerHTML = '<p class="empty-state">Aucun plat ne correspond</p>';
                 return;
             }
-            container.innerHTML = items.map(m => `
-                <div class="menu-grid-item ${m.available ? '' : 'unavailable'}" onclick="App.orders.addItem('${m.id}')">
-                    <div class="item-name">${App.esc(m.name)}</div>
-                    <div class="item-price">${App.fmt(m.price)}</div>
-                </div>
-            `).join('');
+            grid.innerHTML = items.map(m => {
+                const off = m.available === false;
+                const inCart = this.lines.filter(l => l.menuId === m.id).reduce((s, l) => s + l.qty, 0);
+                const cat = App.data.categories.find(c => c.id === m.category);
+                return `<button class="pos-item ${off ? 'off' : ''}" onclick="App.pos.tap('${m.id}')" ${off ? 'disabled aria-disabled="true"' : ''}
+                    aria-label="${App.esc(m.name)}, ${App.fmt(m.price)}${off ? ', indisponible' : ''}">
+                    <span class="pos-item-img">${m.photo ? `<img src="${m.photo}" alt="" loading="lazy">` : `<span>${App.esc(cat ? cat.icon : '🍽️')}</span>`}</span>
+                    ${inCart ? `<span class="pos-item-count">${inCart}</span>` : ''}
+                    <span class="pos-item-name">${App.esc(m.name)}</span>
+                    <span class="pos-item-meta">
+                        <strong>${App.fmt(m.price)}</strong>
+                        ${off ? '<em class="pos-off">Indisponible</em>' : this.hasOptions(m) ? '<em>Options</em>' : ''}
+                    </span>
+                </button>`;
+            }).join('');
         },
 
-        addItem(menuId) {
+        tap(menuId) {
             const m = App.data.menuItems.find(x => x.id === menuId);
-            if (!m || !m.available) return;
-            const existing = this.currentItems.find(x => x.menuId === menuId);
-            if (existing) {
-                existing.qty++;
-            } else {
-                this.currentItems.push({ menuId, name: m.name, price: m.price, qty: 1 });
-            }
-            this.renderOrderItems();
+            if (!m || m.available === false) return;
+            if (this.hasOptions(m)) this.openOptions(menuId);
+            else this.addLine({ menuId, qty: 1 });
         },
 
-        changeQty(menuId, delta) {
-            const item = this.currentItems.find(x => x.menuId === menuId);
-            if (!item) return;
-            item.qty += delta;
-            if (item.qty <= 0) {
-                this.currentItems = this.currentItems.filter(x => x.menuId !== menuId);
-            }
-            this.renderOrderItems();
+        buildLine(cfg) {
+            const m = App.data.menuItems.find(x => x.id === cfg.menuId);
+            const line = { lineId: cfg.lineId || App.genId(), menuId: m.id, name: m.name, price: m.price, qty: cfg.qty };
+            if (cfg.side) line.side = cfg.side;
+            if (cfg.extras && cfg.extras.length) line.extras = cfg.extras.map(e => ({ name: e.name, price: e.price }));
+            if (cfg.prefs && cfg.prefs.length) line.prefs = [...cfg.prefs];
+            if (cfg.comment) line.comment = cfg.comment;
+            line.unitPrice = m.price + (line.extras || []).reduce((s, e) => s + e.price, 0);
+            return line;
         },
 
-        removeItem(menuId) {
-            this.currentItems = this.currentItems.filter(x => x.menuId !== menuId);
-            this.renderOrderItems();
+        sameConfig(a, b) {
+            const key = l => JSON.stringify([l.menuId, l.side || '', (l.extras || []).map(e => e.name), l.prefs || [], l.comment || '']);
+            return key(a) === key(b);
         },
 
-        renderOrderItems() {
-            const container = document.getElementById('orderItems');
-            if (this.currentItems.length === 0) {
-                container.innerHTML = '<p class="empty-state">Aucun article ajoute</p>';
-                document.getElementById('orderTotal').textContent = '0 FCFA';
-                return;
-            }
-            container.innerHTML = this.currentItems.map(it => `
-                <div class="order-item-row">
-                    <div class="item-qty">
-                        <button onclick="App.orders.changeQty('${it.menuId}', -1)">-</button>
-                        <span>${it.qty}</span>
-                        <button onclick="App.orders.changeQty('${it.menuId}', 1)">+</button>
+        addLine(cfg) {
+            const line = this.buildLine(cfg);
+            const same = this.lines.find(l => this.sameConfig(l, line));
+            if (same) same.qty += line.qty; else this.lines.push(line);
+            this.renderCart();
+            this.renderGrid();
+            const bar = document.getElementById('posCartBar');
+            bar.classList.remove('bump');
+            void bar.offsetWidth;
+            bar.classList.add('bump');
+        },
+
+        changeQty(lineId, d) {
+            const l = this.lines.find(x => x.lineId === lineId);
+            if (!l) return;
+            l.qty = Math.min(999, l.qty + d);
+            if (l.qty <= 0) this.lines = this.lines.filter(x => x !== l);
+            this.renderCart();
+            this.renderGrid();
+        },
+
+        removeLine(lineId) {
+            this.lines = this.lines.filter(x => x.lineId !== lineId);
+            this.renderCart();
+            this.renderGrid();
+        },
+
+        setCovers(d) {
+            this.covers = Math.max(1, Math.min(99, this.covers + d));
+            document.getElementById('posCovers').textContent = this.covers;
+        },
+
+        newTotal() {
+            return this.lines.reduce((s, l) => s + l.unitPrice * l.qty, 0);
+        },
+
+        renderCart() {
+            const target = this.target();
+            document.getElementById('posCovers').textContent = this.covers;
+            document.querySelector('.pos-covers').style.display = target ? 'none' : '';
+            const ex = document.getElementById('posExisting');
+            if (target) {
+                ex.innerHTML = `<div class="pos-existing-head">
+                        <span>Deja envoye · #${String(target.number).padStart(3, '0')}</span>
+                        <button class="link-btn" onclick="App.pos.setForceNew(true)">Commande separee</button>
                     </div>
-                    <span class="name">${App.esc(it.name)}</span>
-                    <span class="price">${App.fmt(it.price * it.qty)}</span>
-                    <button class="remove" onclick="App.orders.removeItem('${it.menuId}')">&times;</button>
-                </div>
-            `).join('');
-            const total = this.currentItems.reduce((s, it) => s + it.price * it.qty, 0);
-            document.getElementById('orderTotal').textContent = App.fmt(total);
-        },
-
-        async submitOrder() {
-            if (this.currentItems.length === 0) { App.toast('Ajoutez au moins un article', 'error'); return; }
-            if (this.submitting) return;
-            const tableId = document.getElementById('orderTable').value;
-            const covers = parseInt(document.getElementById('orderCovers').value) || 1;
-            const note = document.getElementById('orderNote').value;
-            const total = this.currentItems.reduce((s, it) => s + it.price * it.qty, 0);
-
-            let number;
-            this.submitting = true;
-            try {
-                const maxLocal = App.data.orders.reduce((m, o) => Math.max(m, o.number || 0), 0);
-                number = (await App.api('/orders/next-number', { method: 'POST', body: { min: maxLocal + 1 } })).number;
-            } catch (e) {
-                App.toast('Connexion impossible : commande non enregistree', 'error');
-                return;
-            } finally {
-                this.submitting = false;
+                    ${target.items.map(it => `<div class="pos-existing-row"><span>${it.qty} x ${App.esc(it.name)}</span><span>${App.fmt(App.lineTotal(it))}</span></div>`).join('')}`;
+            } else if (this.forceNew && (this.takeaway ? false : this.openOrderFor(this.tableId))) {
+                ex.innerHTML = `<div class="pos-existing-head"><span>Nouvelle commande separee</span>
+                    <button class="link-btn" onclick="App.pos.setForceNew(false)">Ajouter plutot a la commande en cours</button></div>`;
+            } else {
+                ex.innerHTML = '';
             }
 
-            const order = {
-                id: App.genId(),
-                number,
-                tableId,
-                covers,
-                items: [...this.currentItems],
-                total,
-                note,
-                status: 'en_cours',
-                createdAt: new Date().toISOString()
-            };
+            const list = document.getElementById('posLines');
+            list.innerHTML = this.lines.length === 0
+                ? '<p class="empty-state pos-empty">Touchez un plat pour l\'ajouter</p>'
+                : this.lines.map(l => {
+                    const m = App.data.menuItems.find(x => x.id === l.menuId);
+                    return `<div class="pos-line">
+                        <div class="pos-qty">
+                            <button onclick="App.pos.changeQty('${l.lineId}', -1)" aria-label="Retirer un ${App.esc(l.name)}">−</button>
+                            <span>${l.qty}</span>
+                            <button onclick="App.pos.changeQty('${l.lineId}', 1)" aria-label="Ajouter un ${App.esc(l.name)}">+</button>
+                        </div>
+                        <div class="pos-line-main">
+                            <span class="pos-line-name">${App.esc(l.name)}</span>
+                            ${App.itemDetailHtml(l)}
+                            <button class="link-btn" onclick="App.pos.openOptions('${l.menuId}', '${l.lineId}')">${m && this.hasOptions(m) ? 'Options / commentaire' : 'Commentaire'}</button>
+                        </div>
+                        <div class="pos-line-end">
+                            <strong>${App.fmt(l.unitPrice * l.qty)}</strong>
+                            <button class="pos-line-remove" onclick="App.pos.removeLine('${l.lineId}')" aria-label="Supprimer ${App.esc(l.name)}">&times;</button>
+                        </div>
+                    </div>`;
+                }).join('');
 
-            App.data.orders.push(order);
-            const table = App.data.tables.find(t => t.id === tableId);
-            if (table) table.status = 'occupee';
-
-            App.saveData();
-            this.closeModal();
-            App.render();
-            App.toast(`Commande #${String(order.number).padStart(3, '0')} enregistree`);
+            const total = this.newTotal();
+            document.getElementById('posTotal').innerHTML = target
+                ? `${App.fmt(total)}<small>Nouveau total commande : ${App.fmt(target.total + total)}</small>` : App.fmt(total);
+            const count = this.lines.reduce((s, l) => s + l.qty, 0);
+            document.getElementById('posCartBarCount').textContent = count ? `${count} article(s) · Voir le panier` : 'Panier vide';
+            document.getElementById('posCartBarTotal').textContent = App.fmt(total);
+            this.updateSend();
         },
 
-        closeModal() {
-            document.getElementById('modalOrder').classList.remove('open');
+        updateSend() {
+            const btn = document.getElementById('posSend');
+            const target = this.target();
+            const total = this.newTotal();
+            const noPlace = !this.takeaway && !this.tableId;
+            btn.disabled = this.sending || !this.lines.length || noPlace;
+            btn.textContent = this.sending ? 'Envoi...'
+                : noPlace ? 'Choisissez une table'
+                : !this.lines.length ? 'Panier vide'
+                : target ? `Ajouter a #${String(target.number).padStart(3, '0')} · ${App.fmt(total)}`
+                : `Envoyer en cuisine · ${App.fmt(total)}`;
+        },
+
+        setForceNew(v) {
+            this.forceNew = v;
+            this.targetOrderId = null;
+            this.render();
+        },
+
+        toggleCart(show) {
+            document.getElementById('pos').classList.toggle('cart-open', !!show);
+        },
+
+        rememberPrint(v) {
+            try { localStorage.setItem('sissiman-print-kitchen', v ? '1' : '0'); } catch (e) { /* stockage indisponible */ }
+        },
+
+        // ---- options ----
+
+        openOptions(menuId, lineId) {
+            const m = App.data.menuItems.find(x => x.id === menuId);
+            if (!m) return;
+            const line = lineId ? this.lines.find(l => l.lineId === lineId) : null;
+            const o = m.options || {};
+            this.opt = {
+                menuId, lineId: line ? line.lineId : null,
+                side: line ? line.side || null : (o.sides && o.sides[0]) || null,
+                extras: new Set(line && line.extras ? line.extras.map(e => e.name) : []),
+                prefs: new Set(line && line.prefs ? line.prefs : []),
+                comment: line ? line.comment || '' : '',
+                qty: line ? line.qty : 1
+            };
+            const group = (title, html) => html ? `<div class="opt-group"><div class="opt-title">${title}</div><div class="opt-chips">${html}</div></div>` : '';
+            document.getElementById('optTitle').textContent = m.name;
+            document.getElementById('optBody').innerHTML =
+                group('Accompagnement', (o.sides || []).map((s, i) =>
+                    `<button class="opt-chip ${this.opt.side === s ? 'on' : ''}" data-kind="side" data-i="${i}" aria-pressed="${this.opt.side === s}" onclick="App.pos.toggleOpt(this)">${App.esc(s)}</button>`).join('')) +
+                group('Supplements', (o.extras || []).map((e, i) =>
+                    `<button class="opt-chip ${this.opt.extras.has(e.name) ? 'on' : ''}" data-kind="extra" data-i="${i}" aria-pressed="${this.opt.extras.has(e.name)}" onclick="App.pos.toggleOpt(this)">${App.esc(e.name)} <small>+${App.fmt(e.price)}</small></button>`).join('')) +
+                group('Preparation', (o.prefs || []).map((p, i) =>
+                    `<button class="opt-chip ${this.opt.prefs.has(p) ? 'on' : ''}" data-kind="pref" data-i="${i}" aria-pressed="${this.opt.prefs.has(p)}" onclick="App.pos.toggleOpt(this)">${App.esc(p)}</button>`).join('')) +
+                `<div class="form-group opt-comment"><label>Commentaire pour la cuisine</label>
+                    <input type="text" id="optComment" maxlength="120" placeholder="Ex: sauce a part" value="${App.esc(this.opt.comment)}" oninput="App.pos.opt.comment = this.value"></div>`;
+            this.updateOptFooter();
+            document.getElementById('modalItemOptions').classList.add('open');
+        },
+
+        toggleOpt(btn) {
+            const m = App.data.menuItems.find(x => x.id === this.opt.menuId);
+            const o = m.options || {};
+            const i = parseInt(btn.dataset.i, 10);
+            if (btn.dataset.kind === 'side') {
+                const v = o.sides[i];
+                this.opt.side = this.opt.side === v ? null : v;
+                btn.parentElement.querySelectorAll('.opt-chip').forEach(b => {
+                    const on = b === btn && this.opt.side === v;
+                    b.classList.toggle('on', on);
+                    b.setAttribute('aria-pressed', on);
+                });
+            } else {
+                const set = btn.dataset.kind === 'extra' ? this.opt.extras : this.opt.prefs;
+                const v = btn.dataset.kind === 'extra' ? o.extras[i].name : o.prefs[i];
+                if (set.has(v)) set.delete(v); else set.add(v);
+                btn.classList.toggle('on', set.has(v));
+                btn.setAttribute('aria-pressed', set.has(v));
+            }
+            this.updateOptFooter();
+        },
+
+        optQty(d) {
+            this.opt.qty = Math.max(1, Math.min(999, this.opt.qty + d));
+            this.updateOptFooter();
+        },
+
+        optLine() {
+            const m = App.data.menuItems.find(x => x.id === this.opt.menuId);
+            const extras = ((m.options || {}).extras || []).filter(e => this.opt.extras.has(e.name));
+            const prefs = ((m.options || {}).prefs || []).filter(p => this.opt.prefs.has(p));
+            return this.buildLine({
+                lineId: this.opt.lineId, menuId: m.id, qty: this.opt.qty, side: this.opt.side,
+                extras, prefs, comment: (this.opt.comment || '').trim()
+            });
+        },
+
+        updateOptFooter() {
+            document.getElementById('optQty').textContent = this.opt.qty;
+            const line = this.optLine();
+            document.getElementById('optAdd').textContent = `${this.opt.lineId ? 'Mettre a jour' : 'Ajouter'} · ${App.fmt(line.unitPrice * line.qty)}`;
+        },
+
+        confirmOptions() {
+            const line = this.optLine();
+            if (this.opt.lineId) {
+                const idx = this.lines.findIndex(l => l.lineId === this.opt.lineId);
+                if (idx >= 0) this.lines[idx] = line;
+                this.renderCart();
+                this.renderGrid();
+            } else {
+                this.addLine({ ...line });
+            }
+            this.closeOptions();
+        },
+
+        closeOptions() {
+            document.getElementById('modalItemOptions').classList.remove('open');
+        },
+
+        // ---- envoi ----
+
+        async send() {
+            if (this.sending || !this.lines.length) return;
+            if (!this.takeaway && !this.tableId) { App.toast('Choisissez une table ou « A emporter »', 'error'); return; }
+            const target = this.target();
+            const note = document.getElementById('posNote').value.trim();
+            const lines = this.lines.map(l => {
+                const copy = { ...l };
+                delete copy.lineId;
+                return copy;
+            });
+            const total = this.newTotal();
+            this.sending = true;
+            this.updateSend();
+            try {
+                if (target) {
+                    const addedAt = new Date().toISOString();
+                    target.items = [...target.items, ...lines.map(l => ({ ...l, addedAt }))];
+                    target.total += total;
+                    target.status = 'en_cours';
+                    if (note) target.note = target.note ? `${target.note} | ${note}` : note;
+                    App.saveData();
+                    App.toast(`Ajoute a la commande #${String(target.number).padStart(3, '0')}`);
+                    if (document.getElementById('posPrintKitchen').checked) App.tickets.kitchen(target.id, addedAt);
+                } else {
+                    if (App.data.orders.some(o => o.id === this.pendingId)) { this.close(true); return; }
+                    if (!this.pendingNumber) {
+                        const maxLocal = App.data.orders.reduce((m, o) => Math.max(m, o.number || 0), 0);
+                        // Kept across retries so a re-click after a network error reuses the same number and id.
+                        this.pendingNumber = (await App.api('/orders/next-number', { method: 'POST', body: { min: maxLocal + 1 } })).number;
+                    }
+                    const order = {
+                        id: this.pendingId, number: this.pendingNumber, tableId: this.takeaway ? '' : this.tableId,
+                        covers: this.covers, items: lines, total, note, status: 'en_cours', createdAt: new Date().toISOString()
+                    };
+                    App.data.orders.push(order);
+                    const table = App.data.tables.find(t => t.id === order.tableId);
+                    if (table) table.status = 'occupee';
+                    App.saveData();
+                    App.toast(`Commande #${String(order.number).padStart(3, '0')} envoyee en cuisine`);
+                    if (document.getElementById('posPrintKitchen').checked) App.tickets.kitchen(order.id);
+                }
+                this.lines = [];
+                this.close(true);
+                App.render();
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible : commande NON envoyee, reessayez', 'error');
+            } finally {
+                this.sending = false;
+                this.updateSend();
+            }
         }
     },
 
@@ -1532,6 +1843,7 @@ const App = {
     menu: {
         editingItemId: null,
         selectedCat: 'all',
+        photo: null,
 
         render() {
             const sidebar = document.getElementById('menuCatsSidebar');
@@ -1541,7 +1853,7 @@ const App = {
             </div>` + App.data.categories.map(c => {
                 const count = App.data.menuItems.filter(m => m.category === c.id).length;
                 return `<div class="menu-cat-item ${this.selectedCat === c.id ? 'active' : ''}" onclick="App.menu.selectCat('${c.id}')">
-                    <span class="cat-icon">${c.icon}</span> ${c.name}
+                    <span class="cat-icon">${App.esc(c.icon)}</span> ${App.esc(c.name)}
                     <span class="cat-count">${count}</span>
                 </div>`;
             }).join('');
@@ -1556,10 +1868,18 @@ const App = {
 
             list.innerHTML = items.map(m => {
                 const cat = App.data.categories.find(c => c.id === m.category);
+                const opts = m.options || {};
+                const optText = [
+                    opts.sides && opts.sides.length ? `${opts.sides.length} accompagnement(s)` : '',
+                    opts.extras && opts.extras.length ? `${opts.extras.length} supplement(s)` : '',
+                    opts.prefs && opts.prefs.length ? `${opts.prefs.length} preference(s)` : ''
+                ].filter(Boolean).join(' · ');
                 return `<div class="menu-item-card ${m.available ? '' : 'unavailable'}">
-                    <div style="flex:1">
-                        <div class="menu-item-name">${cat ? cat.icon : ''} ${App.esc(m.name)}</div>
+                    <div class="menu-item-thumb">${m.photo ? `<img src="${m.photo}" alt="" loading="lazy">` : App.esc(cat ? cat.icon : '🍽️')}</div>
+                    <div style="flex:1;min-width:0">
+                        <div class="menu-item-name">${App.esc(m.name)}</div>
                         <div class="menu-item-desc">${App.esc(m.desc || '')}</div>
+                        ${optText ? `<div class="menu-item-opts">${App.esc(optText)}</div>` : ''}
                     </div>
                     <div class="menu-item-price">${App.fmt(m.price)}</div>
                     <div class="menu-item-actions">
@@ -1581,15 +1901,26 @@ const App = {
             if (m) { m.available = !m.available; App.saveData(); App.render(); }
         },
 
+        fillForm(m) {
+            const o = (m && m.options) || {};
+            document.getElementById('menuItemName').value = m ? m.name : '';
+            document.getElementById('menuItemPrice').value = m ? m.price : '';
+            document.getElementById('menuItemDesc').value = m ? m.desc || '' : '';
+            document.getElementById('menuItemAvailable').checked = m ? m.available !== false : true;
+            document.getElementById('menuItemSides').value = (o.sides || []).join(', ');
+            document.getElementById('menuItemExtras').value = (o.extras || []).map(e => `${e.name}:${e.price}`).join(', ');
+            document.getElementById('menuItemPrefs').value = (o.prefs || []).join(', ');
+            document.querySelector('.options-editor').open = !!(o.sides || o.extras || o.prefs);
+            document.getElementById('menuItemPhotoInput').value = '';
+            this.setPhoto(m ? m.photo || null : null);
+            this.populateCategorySelect(m ? m.category : undefined);
+            document.getElementById('modalMenuItem').classList.add('open');
+        },
+
         openAddModal() {
             this.editingItemId = null;
             document.getElementById('modalMenuItemTitle').textContent = 'Ajouter un plat';
-            document.getElementById('menuItemName').value = '';
-            document.getElementById('menuItemPrice').value = '';
-            document.getElementById('menuItemDesc').value = '';
-            document.getElementById('menuItemAvailable').checked = true;
-            this.populateCategorySelect();
-            document.getElementById('modalMenuItem').classList.add('open');
+            this.fillForm(null);
         },
 
         editItem(id) {
@@ -1597,18 +1928,50 @@ const App = {
             if (!m) return;
             this.editingItemId = id;
             document.getElementById('modalMenuItemTitle').textContent = 'Modifier le plat';
-            document.getElementById('menuItemName').value = m.name;
-            document.getElementById('menuItemPrice').value = m.price;
-            document.getElementById('menuItemDesc').value = m.desc || '';
-            document.getElementById('menuItemAvailable').checked = m.available;
-            this.populateCategorySelect(m.category);
-            document.getElementById('modalMenuItem').classList.add('open');
+            this.fillForm(m);
+        },
+
+        setPhoto(dataUrl) {
+            this.photo = dataUrl;
+            document.getElementById('menuItemPhotoPreview').innerHTML = dataUrl ? `<img src="${dataUrl}" alt="Photo du plat">` : '<span>Aucune photo</span>';
+            document.getElementById('menuItemPhotoRemove').style.display = dataUrl ? '' : 'none';
+        },
+
+        // Phone photos are several MB; they are shrunk to a small JPEG so they fit in the synced menu record.
+        pickPhoto(input) {
+            const file = input.files && input.files[0];
+            if (!file) return;
+            if (!file.type.startsWith('image/')) { App.toast('Choisissez une image', 'error'); return; }
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => {
+                URL.revokeObjectURL(url);
+                const encode = (maxSide, quality) => {
+                    const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+                    const canvas = document.createElement('canvas');
+                    canvas.width = Math.round(img.width * scale);
+                    canvas.height = Math.round(img.height * scale);
+                    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+                    return canvas.toDataURL('image/jpeg', quality);
+                };
+                let data = encode(360, 0.72);
+                if (data.length > 44000) data = encode(300, 0.6);
+                if (data.length > 44000) data = encode(240, 0.5);
+                if (data.length > 44000) { App.toast('Photo trop lourde, essayez une autre image', 'error'); return; }
+                this.setPhoto(data);
+            };
+            img.onerror = () => { URL.revokeObjectURL(url); App.toast('Image illisible', 'error'); };
+            img.src = url;
+        },
+
+        parseList(id) {
+            return document.getElementById(id).value.split(',').map(s => s.trim()).filter(Boolean).slice(0, 12).map(s => s.slice(0, 40));
         },
 
         populateCategorySelect(selected) {
             const sel = document.getElementById('menuItemCategory');
             sel.innerHTML = App.data.categories.map(c =>
-                `<option value="${c.id}" ${c.id === selected ? 'selected' : ''}>${c.icon} ${c.name}</option>`
+                `<option value="${c.id}" ${c.id === selected ? 'selected' : ''}>${App.esc(c.icon)} ${App.esc(c.name)}</option>`
             ).join('');
         },
 
@@ -1619,18 +1982,39 @@ const App = {
         saveItem() {
             const name = document.getElementById('menuItemName').value.trim();
             const category = document.getElementById('menuItemCategory').value;
-            const price = parseInt(document.getElementById('menuItemPrice').value);
+            const price = parseInt(document.getElementById('menuItemPrice').value, 10);
             const desc = document.getElementById('menuItemDesc').value.trim();
             const available = document.getElementById('menuItemAvailable').checked;
 
-            if (!name || !price) { App.toast('Remplissez le nom et le prix', 'error'); return; }
+            if (!name || !(price >= 0)) { App.toast('Remplissez le nom et le prix', 'error'); return; }
 
+            const extras = [];
+            for (const part of this.parseList('menuItemExtras')) {
+                const m = part.match(/^(.+?)\s*:\s*(\d+)$/);
+                if (!m) { App.toast(`Supplement « ${part} » : ecrivez nom:prix (ex: Oeuf:200)`, 'error'); return; }
+                extras.push({ name: m[1].trim(), price: parseInt(m[2], 10) });
+            }
+            const sides = this.parseList('menuItemSides');
+            const prefs = this.parseList('menuItemPrefs');
+            const options = {};
+            if (sides.length) options.sides = sides;
+            if (extras.length) options.extras = extras;
+            if (prefs.length) options.prefs = prefs;
+
+            const fields = { name, category, price, desc, available };
             if (this.editingItemId) {
                 const m = App.data.menuItems.find(x => x.id === this.editingItemId);
-                if (m) { Object.assign(m, { name, category, price, desc, available }); }
+                if (m) {
+                    Object.assign(m, fields);
+                    if (Object.keys(options).length) m.options = options; else delete m.options;
+                    if (this.photo) m.photo = this.photo; else delete m.photo;
+                }
                 App.toast('Plat modifie');
             } else {
-                App.data.menuItems.push({ id: App.genId(), name, category, price, desc, available });
+                const m = { id: App.genId(), ...fields };
+                if (Object.keys(options).length) m.options = options;
+                if (this.photo) m.photo = this.photo;
+                App.data.menuItems.push(m);
                 App.toast('Plat ajoute');
             }
             App.saveData();
@@ -1747,8 +2131,8 @@ const App = {
                 <div class="ticket-items">
                     ${o.items.map(it => `
                         <div class="ticket-row">
-                            <span>${it.qty}x ${App.esc(it.name)}</span>
-                            <span>${App.fmt(it.price * it.qty)}</span>
+                            <span>${it.qty}x ${App.esc(it.name)}${App.itemDetailHtml(it)}</span>
+                            <span>${App.fmt(App.lineTotal(it))}</span>
                         </div>
                     `).join('')}
                 </div>
@@ -2160,7 +2544,8 @@ const App = {
         },
 
         items(o) {
-            return `<div class="tp-sep"></div>${o.items.map(it => this.row(`${it.qty} x ${App.esc(it.name)}`, App.fmt(it.price * it.qty))).join('')}
+            return `<div class="tp-sep"></div>${o.items.map(it => this.row(`${it.qty} x ${App.esc(it.name)}`, App.fmt(App.lineTotal(it))) +
+                (App.itemDetails(it).length ? `<div class="tp-small">&nbsp;&nbsp;${App.esc(App.itemDetails(it).join(', '))}</div>` : '')).join('')}
                 <div class="tp-sep"></div>${this.row('TOTAL', App.fmt(o.total), 'tp-big')}`;
         },
 
@@ -2194,15 +2579,18 @@ const App = {
                 <div class="tp-center">Merci de votre visite !</div>`);
         },
 
-        kitchen(orderId) {
+        kitchen(orderId, onlyAddedAt) {
             const o = App.data.orders.find(x => x.id === orderId);
             if (!o) return;
             const table = App.data.tables.find(t => t.id === o.tableId);
-            this.print(`<div class="tp-center tp-title">CUISINE</div>
-                <div class="tp-kitchen-head">#${String(o.number).padStart(3, '0')} · TABLE ${table ? table.number : '?'}</div>
-                <div class="tp-center">Recue a ${App.esc(new Date(o.createdAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }))}</div>
+            const items = onlyAddedAt ? o.items.filter(it => it.addedAt === onlyAddedAt) : o.items;
+            const at = onlyAddedAt || o.createdAt;
+            this.print(`<div class="tp-center tp-title">${onlyAddedAt ? 'CUISINE · AJOUT' : 'CUISINE'}</div>
+                <div class="tp-kitchen-head">#${String(o.number).padStart(3, '0')} · ${table ? 'TABLE ' + table.number : 'A EMPORTER'}</div>
+                <div class="tp-center">Recue a ${App.esc(new Date(at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }))}</div>
                 <div class="tp-sep"></div>
-                ${o.items.map(it => `<div class="tp-kitchen-item"><strong>${it.qty} x</strong> ${App.esc(it.name)}</div>`).join('')}
+                ${items.map(it => `<div class="tp-kitchen-item"><strong>${it.qty} x</strong> ${App.esc(it.name)}</div>` +
+                    (App.itemDetails(it).length ? `<div class="tp-kitchen-opts">${App.esc(App.itemDetails(it).join(' · '))}</div>` : '')).join('')}
                 ${o.note ? `<div class="tp-sep"></div><div class="tp-kitchen-note">NOTE : ${App.esc(o.note)}</div>` : ''}`);
         },
 
@@ -2267,7 +2655,7 @@ const App = {
                         <span class="cuisine-ticket-timer ${urgent ? 'urgent' : ''}">${mins} min</span>
                     </div>
                     <div class="cuisine-ticket-items">
-                        ${o.items.map(it => `<div class="cuisine-ticket-item"><span><span class="qty">${it.qty}x</span> ${App.esc(it.name)}</span></div>`).join('')}
+                        ${o.items.map(it => `<div class="cuisine-ticket-item ${it.addedAt ? 'added' : ''}"><span><span class="qty">${it.qty}x</span> ${App.esc(it.name)}${it.addedAt ? ' <span class="added-badge">AJOUT</span>' : ''}${App.itemDetailHtml(it)}</span></div>`).join('')}
                     </div>
                     ${o.note ? `<div class="cuisine-ticket-note">${App.esc(o.note)}</div>` : ''}
                     <div class="cuisine-ticket-actions">

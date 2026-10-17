@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=20261017b">
+    <link rel="stylesheet" href="styles.css?v=20261017c">
 </head>
 <body>
     <!-- LOGIN -->
@@ -243,52 +243,6 @@
             </div>
             <div class="orders-list" id="ordersList"></div>
 
-            <div class="modal modal-large" id="modalOrder">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h3>Nouvelle commande</h3>
-                        <button class="modal-close" onclick="App.orders.closeModal()">&times;</button>
-                    </div>
-                    <div class="modal-body">
-                        <div class="order-form-grid">
-                            <div class="order-form-left">
-                                <div class="form-group">
-                                    <label>Table</label>
-                                    <select id="orderTable"></select>
-                                </div>
-                                <div class="form-group">
-                                    <label>Nombre de couverts</label>
-                                    <input type="number" id="orderCovers" min="1" value="1">
-                                </div>
-                                <h4>Menu</h4>
-                                <div class="form-group" style="margin-bottom:0.75rem">
-                                    <input type="text" id="orderSearch" placeholder="Rechercher un plat..." oninput="App.orders.searchMenu(this.value)">
-                                </div>
-                                <div class="menu-categories" id="orderMenuCategories"></div>
-                                <div class="menu-items-grid" id="orderMenuItems"></div>
-                            </div>
-                            <div class="order-form-right">
-                                <h4>Articles commandes</h4>
-                                <div class="order-items" id="orderItems">
-                                    <p class="empty-state">Aucun article ajoute</p>
-                                </div>
-                                <div class="order-total">
-                                    <span>Total:</span>
-                                    <span id="orderTotal">0 FCFA</span>
-                                </div>
-                                <div class="form-group">
-                                    <label>Note</label>
-                                    <textarea id="orderNote" rows="2" placeholder="Instructions speciales..."></textarea>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn btn-secondary" onclick="App.orders.closeModal()">Annuler</button>
-                        <button class="btn btn-primary" onclick="App.orders.submitOrder()">Valider la commande</button>
-                    </div>
-                </div>
-            </div>
         </section>
 
         <!-- MENU -->
@@ -325,6 +279,34 @@
                             <label>Description</label>
                             <textarea id="menuItemDesc" rows="2" placeholder="Description du plat..."></textarea>
                         </div>
+                        <div class="form-group">
+                            <label>Photo</label>
+                            <div class="photo-field">
+                                <div class="photo-preview" id="menuItemPhotoPreview"></div>
+                                <div class="photo-actions">
+                                    <label class="btn btn-small btn-secondary">
+                                        Choisir une photo
+                                        <input type="file" id="menuItemPhotoInput" accept="image/*" hidden onchange="App.menu.pickPhoto(this)">
+                                    </label>
+                                    <button type="button" class="btn btn-small btn-secondary" id="menuItemPhotoRemove" onclick="App.menu.setPhoto(null)">Retirer</button>
+                                </div>
+                            </div>
+                        </div>
+                        <details class="options-editor">
+                            <summary>Options du plat (accompagnements, supplements, preferences)</summary>
+                            <div class="form-group">
+                                <label>Accompagnements au choix (separes par des virgules)</label>
+                                <input type="text" id="menuItemSides" placeholder="Ex: Riz, Attieke, Frites, Aloko">
+                            </div>
+                            <div class="form-group">
+                                <label>Supplements payants (nom:prix, separes par des virgules)</label>
+                                <input type="text" id="menuItemExtras" placeholder="Ex: Oeuf:200, Fromage:300">
+                            </div>
+                            <div class="form-group">
+                                <label>Preferences de preparation (separees par des virgules)</label>
+                                <input type="text" id="menuItemPrefs" placeholder="Ex: Bien cuit, Pimente, Sans oignon">
+                            </div>
+                        </details>
                         <div class="form-group">
                             <label class="checkbox-label">
                                 <input type="checkbox" id="menuItemAvailable" checked>
@@ -631,8 +613,70 @@
         </div>
     </div>
 
+    <div class="pos" id="pos" hidden>
+        <header class="pos-top">
+            <button class="pos-back" onclick="App.pos.close()" aria-label="Fermer la prise de commande">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+            </button>
+            <div class="pos-title">
+                <strong id="posTitle">Nouvelle commande</strong>
+                <span id="posSubtitle">Choisissez une table</span>
+            </div>
+            <div class="pos-tables" id="posTables" role="listbox" aria-label="Table"></div>
+        </header>
+        <div class="pos-body">
+            <section class="pos-menu">
+                <div class="pos-filters">
+                    <input type="search" id="posSearch" placeholder="Rechercher un plat..." oninput="App.pos.search(this.value)" aria-label="Rechercher un plat">
+                    <div class="pos-cats" id="posCats"></div>
+                </div>
+                <div class="pos-grid" id="posGrid"></div>
+            </section>
+            <aside class="pos-cart" id="posCart">
+                <div class="pos-cart-head">
+                    <strong>Panier</strong>
+                    <div class="pos-covers">
+                        <span>Couverts</span>
+                        <button onclick="App.pos.setCovers(-1)" aria-label="Moins de couverts">−</button>
+                        <span id="posCovers">1</span>
+                        <button onclick="App.pos.setCovers(1)" aria-label="Plus de couverts">+</button>
+                    </div>
+                    <button class="pos-cart-hide" onclick="App.pos.toggleCart(false)" aria-label="Fermer le panier">&times;</button>
+                </div>
+                <div class="pos-existing" id="posExisting"></div>
+                <div class="pos-lines" id="posLines"></div>
+                <textarea id="posNote" rows="2" maxlength="200" placeholder="Note pour la cuisine (facultatif)"></textarea>
+                <div class="pos-total"><span>Total</span><strong id="posTotal">0 FCFA</strong></div>
+                <label class="pos-print"><input type="checkbox" id="posPrintKitchen" onchange="App.pos.rememberPrint(this.checked)"> Imprimer le ticket cuisine</label>
+                <button class="btn btn-primary btn-large pos-send" id="posSend" onclick="App.pos.send()">Envoyer en cuisine</button>
+            </aside>
+        </div>
+        <button class="pos-cart-bar" id="posCartBar" onclick="App.pos.toggleCart(true)">
+            <span id="posCartBarCount">Panier vide</span>
+            <strong id="posCartBarTotal">0 FCFA</strong>
+        </button>
+    </div>
+
+    <div class="modal" id="modalItemOptions">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="optTitle">Options</h3>
+                <button class="modal-close" onclick="App.pos.closeOptions()">&times;</button>
+            </div>
+            <div class="modal-body" id="optBody"></div>
+            <div class="modal-footer opt-footer">
+                <div class="pos-qty">
+                    <button onclick="App.pos.optQty(-1)" aria-label="Moins">−</button>
+                    <span id="optQty">1</span>
+                    <button onclick="App.pos.optQty(1)" aria-label="Plus">+</button>
+                </div>
+                <button class="btn btn-primary" id="optAdd" onclick="App.pos.confirmOptions()">Ajouter</button>
+            </div>
+        </div>
+    </div>
+
     <div id="printArea" aria-hidden="true"></div>
 
-    <script src="app.js?v=20261017b"></script>
+    <script src="app.js?v=20261017c"></script>
 </body>
 </html>

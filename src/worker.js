@@ -174,6 +174,53 @@ const ORDER_TRANSITIONS = {
 };
 const ORDER_MUTABLE = new Set(['status']);
 
+const PHOTO_RE = /^data:image\/(jpeg|webp|png);base64,[A-Za-z0-9+/]+=*$/;
+const isShortText = (s, max) => typeof s === 'string' && s.trim().length > 0 && s.length <= max;
+
+function validateMenuItem(m) {
+    if (!isShortText(m.name, 60)) return 'Nom du plat invalide';
+    if (!isInt(m.price, 0, 10000000)) return 'Prix invalide';
+    if (m.photo != null && (typeof m.photo !== 'string' || m.photo.length > 45000 || !PHOTO_RE.test(m.photo))) return 'Photo invalide';
+    const o = m.options;
+    if (o == null) return null;
+    if (typeof o !== 'object' || Array.isArray(o)) return 'Options invalides';
+    const list = (a, ok) => a == null || (Array.isArray(a) && a.length <= 12 && a.every(ok));
+    if (!list(o.sides, s => isShortText(s, 40))) return 'Accompagnements invalides';
+    if (!list(o.prefs, s => isShortText(s, 40))) return 'Preferences invalides';
+    if (!list(o.extras, e => e && isShortText(e.name, 40) && isInt(e.price, 0, 1000000))) return 'Supplements invalides';
+    return null;
+}
+
+// Prices always come from the server's copy of the menu; the client's figures must match them exactly.
+async function validateOrderLines(items, lookup) {
+    let total = 0;
+    for (const it of items) {
+        if (!it || typeof it !== 'object' || !isInt(it.qty, 1, 999)) return { error: 'Quantite invalide' };
+        const m = await lookup('menuItems', it.menuId);
+        if (!m) return { error: 'Plat introuvable' };
+        if (m.available === false) return { error: `${m.name} est indisponible` };
+        if (it.price !== m.price) return { error: `Prix incorrect pour ${m.name}` };
+        const opts = m.options || {};
+        if (it.side != null && !(opts.sides || []).includes(it.side)) return { error: `Accompagnement invalide pour ${m.name}` };
+        if (it.prefs != null && (!Array.isArray(it.prefs) || !it.prefs.every(p => (opts.prefs || []).includes(p)))) {
+            return { error: `Preference invalide pour ${m.name}` };
+        }
+        let unit = m.price;
+        if (it.extras != null) {
+            if (!Array.isArray(it.extras) || it.extras.length > 12) return { error: `Supplements invalides pour ${m.name}` };
+            for (const e of it.extras) {
+                const ref = (opts.extras || []).find(x => e && x.name === e.name);
+                if (!ref || ref.price !== e.price) return { error: `Supplement incorrect pour ${m.name}` };
+                unit += ref.price;
+            }
+        }
+        if (it.comment != null && (typeof it.comment !== 'string' || it.comment.length > 120)) return { error: 'Commentaire trop long' };
+        if (it.unitPrice != null && it.unitPrice !== unit) return { error: `Prix incorrect pour ${m.name}` };
+        total += unit * it.qty;
+    }
+    return { total };
+}
+
 // Returns an error message when the change is not allowed, null otherwise.
 async function checkChange(c, ctx) {
     const { user } = ctx;
@@ -189,10 +236,7 @@ async function checkChange(c, ctx) {
             return can(user, 'gerant') ? null : 'Seul le gerant peut modifier les categories';
 
         case 'menuItems': {
-            if (can(user, 'gerant')) {
-                if (after && (!Number.isFinite(after.price) || after.price < 0)) return 'Prix invalide';
-                return null;
-            }
+            if (can(user, 'gerant')) return after ? validateMenuItem(after) : null;
             if (before && after && can(user, 'cuisinier') && onlyChanged(new Set(['available']))) return null;
             return 'Seul le gerant peut modifier le menu et les prix';
         }
@@ -216,16 +260,29 @@ async function checkChange(c, ctx) {
                 if (!isInt(after.number, 1, 1e9)) return 'Numero de commande invalide';
                 if (!Array.isArray(after.items) || after.items.length === 0 || after.items.length > 100) return 'Articles invalides';
                 if (after.tableId && !(await ctx.lookup('tables', after.tableId))) return 'Table introuvable';
-                let total = 0;
-                for (const it of after.items) {
-                    if (!it || !isInt(it.qty, 1, 999)) return 'Quantite invalide';
-                    const m = await ctx.lookup('menuItems', it.menuId);
-                    if (!m) return 'Plat introuvable';
-                    if (m.available === false) return `${m.name} est indisponible`;
-                    if (it.price !== m.price) return `Prix incorrect pour ${m.name}`;
-                    total += m.price * it.qty;
+                const v = await validateOrderLines(after.items, ctx.lookup);
+                if (v.error) return v.error;
+                if (after.total !== v.total) return 'Total incorrect';
+                return null;
+            }
+            if ('items' in diff || 'total' in diff) {
+                // Only appending lines to an open order is allowed; existing lines stay untouched.
+                if (!can(user, 'gerant', 'serveur', 'caissier')) return "Vous n'etes pas autorise a modifier une commande";
+                if (!ACTIVE_ORDER.includes(before.status)) return 'Cette commande est cloturee, creez-en une nouvelle';
+                if (!onlyChanged(new Set(['items', 'total', 'status', 'note']))) return 'Modification non autorisee';
+                if ('note' in diff && (typeof after.note !== 'string' || after.note.length > 600 || !after.note.startsWith(before.note || ''))) {
+                    return 'La note existante ne peut pas etre modifiee';
                 }
-                if (after.total !== total) return 'Total incorrect';
+                const old = before.items || [];
+                if (!Array.isArray(after.items) || after.items.length <= old.length || after.items.length > 200) return 'Articles invalides';
+                if (old.some((it, i) => JSON.stringify(it) !== JSON.stringify(after.items[i]))) {
+                    return 'Les articles deja envoyes en cuisine ne peuvent pas etre modifies';
+                }
+                const added = after.items.slice(old.length);
+                const v = await validateOrderLines(added, ctx.lookup);
+                if (v.error) return v.error;
+                if (after.total !== before.total + v.total) return 'Total incorrect';
+                if (after.status !== 'en_cours') return 'Une commande completee repasse en preparation';
                 return null;
             }
             if (!onlyChanged(ORDER_MUTABLE)) return 'Les articles et le total ne peuvent plus etre modifies';
