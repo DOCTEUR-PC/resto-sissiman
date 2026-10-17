@@ -2328,6 +2328,120 @@ body {
     background: var(--bg-secondary);
 }
 
+/* PLAN DE SALLE */
+:root {
+    --fs-libre: #0ca30c;
+    --fs-commande: #e8890c;
+    --fs-occupee: #d03b3b;
+    --fs-addition: #2563eb;
+    --fs-reservee: #7c3aed;
+    --fs-indisponible: #9d97a8;
+}
+[data-theme="dark"] {
+    --fs-addition: #3987e5;
+    --fs-reservee: #9085e9;
+    --fs-indisponible: #6b6878;
+}
+.st-libre { --fs: var(--fs-libre); }
+.st-commande { --fs: var(--fs-commande); }
+.st-occupee { --fs: var(--fs-occupee); }
+.st-addition { --fs: var(--fs-addition); }
+.st-reservee { --fs: var(--fs-reservee); }
+.st-indisponible { --fs: var(--fs-indisponible); }
+
+.floor-actions { justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+.floor-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.8rem; color: var(--text-secondary); flex: 1 1 28rem; }
+.legend-state { display: inline-flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
+.legend-state i, .drawer-state i { width: 12px; height: 12px; border-radius: 4px; background: var(--fs); display: inline-block; flex-shrink: 0; }
+.legend-state b { color: var(--text); }
+.floor-buttons { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.floor-edit-hint { margin: -0.25rem 0 1rem; padding: 0.6rem 0.85rem; border-radius: var(--radius-sm); background: var(--info-bg); color: var(--text); font-size: 0.85rem; }
+
+.floor { display: grid; gap: 1.25rem; }
+.floor-zone { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.85rem 1rem 1rem; }
+.floor-zone-title { font-family: var(--font); font-size: 0.85rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: 0.5rem; }
+.floor-zone-title span { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text-muted); margin-left: 0.35rem; }
+.floor-area {
+    position: relative; border-radius: 12px;
+    background-color: var(--surface-light);
+    background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
+    background-size: 22px 22px;
+    min-height: 200px;
+}
+.floor.editing .floor-area { outline: 2px dashed var(--info); outline-offset: -2px; }
+
+.ftable {
+    position: absolute; transform: translate(-50%, -50%);
+    width: 86px; height: 86px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.05rem;
+    border: 2px solid var(--fs); border-radius: 14px;
+    background: color-mix(in srgb, var(--fs) 14%, var(--surface));
+    color: var(--text); font: inherit; cursor: pointer; padding: 0.25rem;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+    transition: box-shadow 0.15s, transform 0.15s;
+    touch-action: manipulation;
+}
+.ftable.round { border-radius: 50%; width: 80px; height: 80px; }
+.ftable.long { width: 124px; height: 80px; }
+.ftable:hover { box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12); }
+.ftable:focus-visible { outline: 3px solid var(--gold); outline-offset: 3px; }
+.ftable.selected { box-shadow: 0 0 0 3px var(--surface), 0 0 0 6px var(--fs); }
+.ftable.st-indisponible { background: repeating-linear-gradient(135deg, var(--surface-light) 0 8px, var(--surface) 8px 16px); color: var(--text-muted); }
+.ftable.st-reservee { border-style: dashed; }
+.ftable.target { animation: targetPulse 1.4s ease-in-out infinite; }
+@keyframes targetPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(12, 163, 12, 0); } 50% { box-shadow: 0 0 0 6px rgba(12, 163, 12, 0.35); } }
+.floor.editing .ftable { cursor: grab; touch-action: none; }
+.ftable.dragging { cursor: grabbing; z-index: 5; box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25); transition: none; }
+.ftable-num { font-size: 1.35rem; font-weight: 800; line-height: 1; }
+.ftable-state { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
+.ftable-meta { font-size: 0.68rem; color: var(--text-secondary); white-space: nowrap; }
+
+.table-drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 400px; max-width: 100%; z-index: 120;
+    background: var(--surface); border-left: 1px solid var(--border);
+    box-shadow: -12px 0 40px rgba(0, 0, 0, 0.12);
+    display: flex; flex-direction: column;
+}
+.table-drawer[hidden] { display: none; }
+@media (min-width: 1100px) {
+    body.table-drawer-open #page-tables { padding-right: calc(400px + 1.5rem); }
+}
+.drawer-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; padding: 1rem 1.15rem; border-bottom: 1px solid var(--border); }
+.drawer-head h3 { font-size: 1.3rem; }
+.drawer-state { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); margin-top: 0.2rem; }
+.drawer-body { flex: 1; overflow-y: auto; padding: 1rem 1.15rem 1.5rem; display: grid; gap: 1rem; align-content: start; }
+.drawer-info { display: grid; grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr)); gap: 0.5rem; }
+.drawer-info div { background: var(--surface-light); border-radius: 10px; padding: 0.5rem 0.65rem; display: flex; flex-direction: column; }
+.drawer-info span { font-size: 0.72rem; color: var(--text-secondary); }
+.drawer-info strong { font-size: 0.92rem; }
+.drawer-order { border: 1px solid var(--border); border-radius: 12px; padding: 0.75rem 0.85rem; }
+.drawer-order-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
+.drawer-order ul { list-style: none; padding: 0; margin: 0 0 0.5rem; display: grid; gap: 0.3rem; font-size: 0.86rem; }
+.drawer-order li { display: flex; justify-content: space-between; gap: 0.75rem; }
+.drawer-order li span:last-child { white-space: nowrap; }
+.drawer-order-total { display: grid; gap: 0.2rem; font-size: 0.85rem; border-top: 1px dashed var(--border); padding-top: 0.45rem; }
+.drawer-order-total div { display: flex; justify-content: space-between; }
+.drawer-order-total .rest strong { color: var(--gold); }
+.drawer-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.6rem; }
+.drawer-actions .btn { flex: 1 1 auto; }
+.drawer-empty { color: var(--text-muted); font-size: 0.88rem; }
+.drawer-section-title { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); }
+.drawer-transfer { background: var(--info-bg); border-radius: 12px; padding: 0.75rem 0.85rem; display: grid; gap: 0.5rem; font-size: 0.86rem; }
+.transfer-list { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+
+@media (max-width: 768px) {
+    .table-drawer { top: auto; width: 100%; max-height: 85vh; border-left: none; border-top: 1px solid var(--border); border-radius: 18px 18px 0 0; box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.2); }
+    .ftable { width: 68px; height: 68px; }
+    .ftable.round { width: 64px; height: 64px; }
+    .ftable.long { width: 92px; height: 66px; }
+    .ftable-num { font-size: 1.1rem; }
+    .ftable-state, .ftable-meta { font-size: 0.6rem; }
+    .floor-zone { padding: 0.6rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .ftable.target { animation: none; outline: 2px dashed var(--fs-libre); }
+}
+
 /* ECRAN CUISINE */
 .kitchen-bar {
     display: flex; align-items: center; justify-content: space-between; gap: 0.75rem 1.25rem; flex-wrap: wrap;
@@ -2451,8 +2565,11 @@ body.pos-open { overflow: hidden; }
     border-bottom: 3px solid var(--st-good);
 }
 .pos-table small { font-size: 0.65rem; font-weight: 600; color: var(--text-secondary); }
-.pos-table.occupee { border-bottom-color: var(--st-serious); }
-.pos-table.reservee { border-bottom-color: var(--info); }
+.pos-table.st-libre { border-bottom-color: var(--fs-libre); }
+.pos-table.st-commande { border-bottom-color: var(--fs-commande); }
+.pos-table.st-occupee { border-bottom-color: var(--fs-occupee); }
+.pos-table.st-addition { border-bottom-color: var(--fs-addition); }
+.pos-table.st-reservee { border-bottom-color: var(--fs-reservee); }
 .pos-table.takeaway { border-bottom-color: var(--border); font-weight: 600; }
 .pos-table.selected { background: var(--gold); border-color: var(--gold); color: #fff; }
 .pos-table.selected small { color: rgba(255, 255, 255, 0.85); }

@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=20261017e">
+    <link rel="stylesheet" href="styles.css?v=20261017g">
 </head>
 <body>
     <!-- LOGIN -->
@@ -193,10 +193,26 @@
 
         <!-- TABLES -->
         <section class="page" id="page-tables">
-            <div class="page-actions">
-                <button class="btn btn-primary" data-perm="tables.manage" onclick="App.tables.openAddModal()">+ Ajouter une table</button>
+            <div class="page-actions floor-actions">
+                <div class="floor-legend" id="floorLegend"></div>
+                <div class="floor-buttons">
+                    <button class="btn btn-secondary" data-perm="tables.manage" id="floorEditBtn" onclick="App.tables.toggleEdit()">Modifier le plan</button>
+                    <button class="btn btn-primary" data-perm="tables.manage" onclick="App.tables.openAddModal()">+ Ajouter une table</button>
+                </div>
             </div>
-            <div class="tables-grid" id="tablesGrid"></div>
+            <p class="floor-edit-hint" id="floorEditHint" hidden>Faites glisser les tables pour les placer comme dans votre salle, puis cliquez sur « Terminer ».</p>
+            <div class="floor" id="tablesGrid"></div>
+
+            <aside class="table-drawer" id="tableDrawer" hidden aria-labelledby="drawerTitle">
+                <div class="drawer-head">
+                    <div>
+                        <h3 id="drawerTitle">Table</h3>
+                        <span class="drawer-state" id="drawerState"></span>
+                    </div>
+                    <button class="modal-close" onclick="App.tables.closeDrawer()" aria-label="Fermer">&times;</button>
+                </div>
+                <div class="drawer-body" id="drawerBody"></div>
+            </aside>
 
             <div class="modal" id="modalTable">
                 <div class="modal-content">
@@ -215,11 +231,8 @@
                         </div>
                         <div class="form-group">
                             <label>Emplacement</label>
-                            <select id="tableLocation">
-                                <option value="interieur">Interieur</option>
-                                <option value="terrasse">Terrasse</option>
-                                <option value="vip">VIP</option>
-                            </select>
+                            <input type="text" id="tableLocation" list="tableZones" maxlength="30" placeholder="Ex: Interieur, Terrasse, VIP">
+                            <datalist id="tableZones"></datalist>
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -679,6 +692,6 @@
 
     <div id="printArea" aria-hidden="true"></div>
 
-    <script src="app.js?v=20261017e"></script>
+    <script src="app.js?v=20261017g"></script>
 </body>
 </html>

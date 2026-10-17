@@ -172,7 +172,8 @@ const ORDER_TRANSITIONS = {
     'prete>annulee': ['gerant', 'caissier'],
     'servie>annulee': ['gerant', 'caissier']
 };
-const ORDER_MUTABLE = new Set(['status', 'startedAt']);
+const ORDER_MUTABLE = new Set(['status', 'startedAt', 'tableId']);
+const TABLE_STATUSES = new Set(['libre', 'occupee', 'reservee', 'indisponible']);
 
 const PHOTO_RE = /^data:image\/(jpeg|webp|png);base64,[A-Za-z0-9+/]+=*$/;
 const isShortText = (s, max) => typeof s === 'string' && s.trim().length > 0 && s.length <= max;
@@ -242,8 +243,26 @@ async function checkChange(c, ctx) {
         }
 
         case 'tables': {
-            if (can(user, 'gerant')) return null;
-            if (before && after && onlyChanged(new Set(['status']))) return null;
+            if (after && !TABLE_STATUSES.has(after.status)) return 'Etat de table invalide';
+            const becomesOff = after && after.status === 'indisponible' && (!before || before.status !== 'indisponible');
+            if (becomesOff) {
+                if (!can(user, 'gerant')) return 'Seul le gerant peut rendre une table indisponible';
+                if (await ctx.activeOrdersOn(c.id) > 0) return 'Cette table a une commande en cours';
+            }
+            if (!after && before && await ctx.activeOrdersOn(c.id) > 0) return 'Cette table a une commande en cours';
+            if (can(user, 'gerant')) {
+                if (!after) return null;
+                if (!isInt(after.number, 1, 9999) || !isInt(after.seats, 1, 60)) return 'Numero ou nombre de places invalide';
+                if (typeof after.location !== 'string' || after.location.length > 30) return 'Zone invalide';
+                for (const k of ['x', 'y']) {
+                    if (after[k] != null && !(typeof after[k] === 'number' && after[k] >= 0 && after[k] <= 100)) return 'Position invalide';
+                }
+                return null;
+            }
+            if (before && after && onlyChanged(new Set(['status']))) {
+                if (before.status === 'indisponible') return 'Seul le gerant peut remettre cette table en service';
+                return null;
+            }
             return 'Seul le gerant peut creer, modifier ou supprimer des tables';
         }
 
@@ -289,6 +308,14 @@ async function checkChange(c, ctx) {
             if ('startedAt' in diff) {
                 if (!can(user, 'gerant', 'cuisinier')) return 'Seule la cuisine peut demarrer une commande';
                 if (before.status !== 'en_cours') return 'Cette commande a deja quitte la cuisine';
+            }
+            if ('tableId' in diff) {
+                if (!can(user, 'gerant', 'serveur', 'caissier')) return "Vous n'etes pas autorise a transferer une commande";
+                if (!ACTIVE_ORDER.includes(before.status) || 'status' in diff) return 'Seule une commande en cours peut etre transferee';
+                const dest = await ctx.lookup('tables', after.tableId);
+                if (!dest) return 'Table de destination introuvable';
+                if (dest.status === 'indisponible') return `La table ${dest.number} est indisponible`;
+                if (await ctx.activeOrdersOn(after.tableId, c.id) > 0) return `La table ${dest.number} a deja une commande en cours`;
             }
             if (!('status' in diff)) return null;
             const roles = ORDER_TRANSITIONS[before.status + '>' + after.status];
@@ -363,6 +390,19 @@ async function push(request, db, user) {
             if (existing.has(key)) return existing.get(key);
             if (!extraCache.has(key)) extraCache.set(key, (await loadRecords(db, [key])).get(key) || null);
             return extraCache.get(key);
+        },
+        // Active orders seated at a table, taking into account orders already accepted earlier in this batch.
+        async activeOrdersOn(tableId, exceptOrderId) {
+            const { results } = await db.prepare(`SELECT id FROM records WHERE collection = 'orders' AND deleted = 0
+                AND json_extract(data, '$.tableId') = ? AND json_extract(data, '$.status') IN ('en_cours', 'prete', 'servie')`)
+                .bind(tableId).all();
+            const ids = new Set(results.map(r => r.id));
+            for (const a of accepted.values()) {
+                if (a.collection !== 'orders' || !a.after) continue;
+                if (a.after.tableId === tableId && ACTIVE_ORDER.includes(a.after.status)) ids.add(a.id); else ids.delete(a.id);
+            }
+            if (exceptOrderId) ids.delete(exceptOrderId);
+            return ids.size;
         }
     };
 

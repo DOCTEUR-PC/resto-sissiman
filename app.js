@@ -1007,7 +1007,7 @@ const App = {
         renderActivity(unpaid) {
             const count = s => App.data.orders.filter(o => o.status === s).length;
             const servedUnpaid = unpaid.filter(o => o.status === 'servie').length;
-            const occupied = App.data.tables.filter(t => t.status === 'occupee').length;
+            const occupied = App.data.tables.filter(t => ['commande', 'addition', 'occupee'].includes(App.tables.state(t))).length;
             const tile = (label, value, sub, page) => {
                 const clickable = App.can('page.' + page);
                 return `<${clickable ? 'button' : 'div'} class="activity-tile" ${clickable ? `onclick="App.navigateTo('${page}')"` : ''}>
@@ -1330,54 +1330,304 @@ const App = {
     // TABLES
     tables: {
         editingId: null,
+        openId: null,
+        transferFrom: null,
+        editMode: false,
+        drag: null,
+        ACTIVE: ['en_cours', 'prete', 'servie'],
+        STATES: {
+            libre: { label: 'Disponible', short: 'Libre' },
+            commande: { label: 'Commande en cours', short: 'En cours' },
+            occupee: { label: 'Occupee, pas encore commande', short: 'Occupee' },
+            addition: { label: 'Addition a regler', short: 'Addition' },
+            reservee: { label: 'Reservee', short: 'Reservee' },
+            indisponible: { label: 'Indisponible', short: 'Hors service' }
+        },
+        ZONES: { interieur: 'Interieur', terrasse: 'Terrasse', vip: 'VIP' },
+
+        zoneKey(loc) {
+            return String(loc || 'salle').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase() || 'salle';
+        },
+
+        zoneLabel(loc) {
+            return this.ZONES[this.zoneKey(loc)] || String(loc || 'Salle');
+        },
+
+        activeOrders(tableId) {
+            return App.data.orders.filter(o => o.tableId === tableId && this.ACTIVE.includes(o.status))
+                .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        },
+
+        // The colour comes from what is happening at the table (its orders), not only from the stored status.
+        state(t) {
+            if (t.status === 'indisponible') return 'indisponible';
+            const orders = this.activeOrders(t.id);
+            if (orders.some(o => o.status === 'en_cours' || o.status === 'prete')) return 'commande';
+            if (orders.length) return 'addition';
+            if (t.status === 'occupee') return 'occupee';
+            if (t.status === 'reservee') return 'reservee';
+            return 'libre';
+        },
 
         render() {
-            const grid = document.getElementById('tablesGrid');
+            const counts = {};
+            App.data.tables.forEach(t => { const s = this.state(t); counts[s] = (counts[s] || 0) + 1; });
+            document.getElementById('floorLegend').innerHTML = Object.entries(this.STATES).map(([k, v]) =>
+                `<span class="legend-state st-${k}"><i aria-hidden="true"></i>${v.label} <b>${counts[k] || 0}</b></span>`).join('');
+
+            const floor = document.getElementById('tablesGrid');
+            floor.classList.toggle('editing', this.editMode);
             if (App.data.tables.length === 0) {
-                grid.innerHTML = '<p class="empty-state">Aucune table configuree. Ajoutez-en une !</p>';
+                floor.innerHTML = '<p class="empty-state">Aucune table configuree. Ajoutez-en une !</p>';
+                this.renderDrawer();
                 return;
             }
-            const locationLabels = { interieur: 'Interieur', terrasse: 'Terrasse', vip: 'VIP' };
-            grid.innerHTML = App.data.tables.map(t => {
-                let mainBtn = '';
-                if (t.status === 'libre') {
-                    mainBtn = `<button class="btn btn-small btn-success" onclick="event.stopPropagation(); App.tables.setStatus('${t.id}','occupee')">Occuper</button>`;
-                } else if (t.status === 'occupee') {
-                    mainBtn = `<button class="btn btn-small btn-warning" onclick="event.stopPropagation(); App.tables.setStatus('${t.id}','libre')">Liberer</button>`;
-                } else if (t.status === 'reservee') {
-                    mainBtn = `<button class="btn btn-small btn-success" onclick="event.stopPropagation(); App.tables.setStatus('${t.id}','libre')">Liberer</button>`;
-                }
-                return `<div class="table-card ${App.esc(t.status)}">
-                    <div class="table-card-header">
-                        <div class="table-number">T${t.number}</div>
-                        <span class="table-status ${App.esc(t.status)}">${App.esc(t.status)}</span>
+            const zones = {};
+            [...App.data.tables].sort((a, b) => a.number - b.number).forEach(t => {
+                const k = this.zoneKey(t.location);
+                (zones[k] = zones[k] || { label: this.zoneLabel(t.location), tables: [] }).tables.push(t);
+            });
+            const now = Date.now();
+            floor.innerHTML = Object.values(zones).map(z => {
+                const cols = 4;
+                const rows = Math.max(1, Math.ceil(z.tables.length / cols));
+                const height = Math.max(200, rows * 130);
+                return `<section class="floor-zone">
+                    <h3 class="floor-zone-title">${App.esc(z.label)} <span>${z.tables.length} table(s)</span></h3>
+                    <div class="floor-area" style="height:${height}px" data-zone="${App.esc(this.zoneKey(z.tables[0].location))}">
+                        ${z.tables.map((t, i) => this.tableHtml(t, i, cols, rows, now)).join('')}
                     </div>
-                    <div class="table-info">
-                        <span class="seats-icon">${t.seats} places</span>
-                        <span>${App.esc(locationLabels[t.location] || t.location)}</span>
+                </section>`;
+            }).join('');
+            this.renderDrawer();
+        },
+
+        tableHtml(t, i, cols, rows, now) {
+            const x = t.x != null ? t.x : (i % cols + 0.5) / cols * 100;
+            const y = t.y != null ? t.y : (Math.floor(i / cols) + 0.5) / rows * 100;
+            const st = this.state(t);
+            const orders = this.activeOrders(t.id);
+            const shape = t.seats <= 2 ? 'round' : t.seats <= 4 ? 'square' : 'long';
+            const since = orders.length ? Math.floor((now - new Date(orders[0].createdAt).getTime()) / 60000) : null;
+            const due = orders.reduce((s, o) => s + App.balance(o).remaining, 0);
+            const label = `Table ${t.number}, ${t.seats} places, ${this.STATES[st].label}${since !== null ? `, depuis ${since} min` : ''}`;
+            return `<button class="ftable ${shape} st-${st} ${this.openId === t.id ? 'selected' : ''} ${this.transferFrom && this.canReceive(t) ? 'target' : ''}"
+                style="left:${x}%;top:${y}%" data-id="${t.id}" aria-label="${App.esc(label)}"
+                onclick="App.tables.onTableClick('${t.id}')" onpointerdown="App.tables.dragStart(event, '${t.id}')">
+                <span class="ftable-num">${t.number}</span>
+                <span class="ftable-state">${this.STATES[st].short}</span>
+                <span class="ftable-meta">${since !== null ? `${since} min${due ? ' · ' + App.dashboard.compact(due) : ''}` : `${t.seats} pl.`}</span>
+            </button>`;
+        },
+
+        onTableClick(id) {
+            if (this.editMode) return;
+            if (this.transferFrom) {
+                const t = App.data.tables.find(x => x.id === id);
+                if (t && this.canReceive(t)) this.transfer(this.transferFrom, id);
+                else App.toast('Choisissez une table libre (contour pointille)', 'error');
+                return;
+            }
+            this.openDrawer(id);
+        },
+
+        openDrawer(id) {
+            this.openId = id;
+            this.transferFrom = null;
+            this.render();
+        },
+
+        closeDrawer() {
+            this.openId = null;
+            this.transferFrom = null;
+            this.render();
+        },
+
+        renderDrawer() {
+            const drawer = document.getElementById('tableDrawer');
+            const t = App.data.tables.find(x => x.id === this.openId);
+            document.body.classList.toggle('table-drawer-open', !!t);
+            if (!t) { drawer.hidden = true; this.openId = null; return; }
+            drawer.hidden = false;
+            const st = this.state(t);
+            const orders = this.activeOrders(t.id);
+            const now = Date.now();
+            document.getElementById('drawerTitle').textContent = `Table ${t.number}`;
+            const stateEl = document.getElementById('drawerState');
+            stateEl.className = `drawer-state st-${st}`;
+            stateEl.innerHTML = `<i aria-hidden="true"></i>${this.STATES[st].label}`;
+
+            const opened = orders.length ? new Date(orders[0].createdAt) : null;
+            const btn = (label, onclick, cls = 'btn-secondary') => `<button class="btn ${cls}" onclick="${onclick}">${label}</button>`;
+            let html = `<div class="drawer-info">
+                <div><span>Places</span><strong>${t.seats}</strong></div>
+                <div><span>Zone</span><strong>${App.esc(this.zoneLabel(t.location))}</strong></div>
+                ${opened ? `<div><span>Ouverte a</span><strong>${opened.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${Math.floor((now - opened) / 60000)} min</strong></div>` : ''}
+            </div>`;
+
+            if (this.transferFrom) {
+                const o = App.data.orders.find(x => x.id === this.transferFrom);
+                const targets = App.data.tables.filter(x => this.canReceive(x)).sort((a, b) => a.number - b.number);
+                html += `<div class="drawer-transfer">
+                    <strong>Transferer la commande #${String(o.number).padStart(3, '0')}</strong>
+                    <p>Touchez une table libre sur le plan ou choisissez-la ici :</p>
+                    <div class="transfer-list">${targets.length ? targets.map(x => `<button class="pos-table" onclick="App.tables.transfer('${o.id}', '${x.id}')">T${x.number}<small>${x.seats} pl.</small></button>`).join('') : '<em>Aucune table libre</em>'}</div>
+                    ${btn('Annuler le transfert', 'App.tables.cancelTransfer()')}
+                </div>`;
+            }
+
+            html += orders.length ? orders.map(o => {
+                const b = App.balance(o);
+                return `<div class="drawer-order">
+                    <div class="drawer-order-head">
+                        <strong>#${String(o.number).padStart(3, '0')}</strong>
+                        <span class="order-status ${App.esc(o.status)}">${App.esc(o.status.replace('_', ' '))}</span>
                     </div>
-                    <div class="table-main-action">${App.can('orders.create') ? `<button class="btn btn-small btn-primary" onclick="event.stopPropagation(); App.pos.open('${t.id}')">Commander</button>` : ''}${mainBtn}</div>
-                    <div class="table-actions">
-                        ${t.status === 'libre' ? `<button class="btn-icon btn-warning" title="Reserver" onclick="event.stopPropagation(); App.tables.setStatus('${t.id}','reservee')"><svg viewBox="0 0 24 24"><path d="M19 4H5a2 2 0 00-2 2v14l4-4h12a2 2 0 002-2V6a2 2 0 00-2-2z"/></svg></button>` : ''}
-                        ${App.can('tables.manage') ? `<button class="btn-icon btn-secondary" title="Modifier" onclick="event.stopPropagation(); App.tables.edit('${t.id}')"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
-                        <button class="btn-icon btn-danger" title="Supprimer" onclick="event.stopPropagation(); App.tables.remove('${t.id}')"><svg viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg></button>` : ''}
+                    <ul>${o.items.map(it => `<li><span>${it.qty} x ${App.esc(it.name)}${App.itemDetailHtml(it)}</span><span>${App.fmt(App.lineTotal(it))}</span></li>`).join('')}</ul>
+                    <div class="drawer-order-total">
+                        <div><span>Total</span><strong>${App.fmt(o.total)}</strong></div>
+                        <div><span>Paye</span><strong>${App.fmt(b.paid)}</strong></div>
+                        <div class="rest"><span>Reste a payer</span><strong>${App.fmt(b.remaining)}</strong></div>
+                    </div>
+                    <div class="drawer-actions">
+                        ${App.can('orders.create') ? btn('+ Ajouter des plats', `App.pos.open('${t.id}', '${o.id}')`, 'btn-primary') : ''}
+                        ${App.can('page.caisse') && b.remaining > 0 ? btn('Encaisser', `App.tables.goPay('${o.id}')`) : ''}
+                        ${btn("Imprimer l'addition", `App.tickets.bill('${o.id}')`)}
+                        ${App.can('orders.create') && !this.transferFrom ? btn('Transferer', `App.tables.startTransfer('${o.id}')`) : ''}
                     </div>
                 </div>`;
-            }).join('');
+            }).join('') : `<p class="drawer-empty">Aucune commande en cours sur cette table.</p>
+                ${App.can('orders.create') && st !== 'indisponible' ? `<div class="drawer-actions">${btn('Prendre la commande', `App.pos.open('${t.id}')`, 'btn-primary')}</div>` : ''}`;
+
+            const statusBtns = [];
+            if (!orders.length) {
+                if (st === 'libre' || st === 'reservee') statusBtns.push(btn('Installer des clients', `App.tables.setStatus('${t.id}','occupee')`));
+                if (st === 'libre') statusBtns.push(btn('Reserver', `App.tables.setStatus('${t.id}','reservee')`));
+                if (st === 'occupee' || st === 'reservee') statusBtns.push(btn('Liberer la table', `App.tables.setStatus('${t.id}','libre')`));
+                if (App.can('tables.manage')) {
+                    statusBtns.push(st === 'indisponible'
+                        ? btn('Remettre en service', `App.tables.setStatus('${t.id}','libre')`)
+                        : btn('Rendre indisponible', `App.tables.setStatus('${t.id}','indisponible')`));
+                }
+            }
+            if (App.can('tables.manage')) {
+                statusBtns.push(btn('Modifier', `App.tables.edit('${t.id}')`));
+                if (!orders.length) statusBtns.push(btn('Supprimer', `App.tables.remove('${t.id}')`, 'btn-danger'));
+            }
+            if (statusBtns.length) html += `<div class="drawer-section"><div class="drawer-section-title">Table</div><div class="drawer-actions">${statusBtns.join('')}</div></div>`;
+            document.getElementById('drawerBody').innerHTML = html;
+        },
+
+        goPay(orderId) {
+            this.closeDrawer();
+            App.navigateTo('caisse');
+            App.caisse.selectOrder(orderId);
+        },
+
+        canReceive(t) {
+            const st = this.state(t);
+            return st === 'libre' || st === 'reservee' || st === 'occupee';
+        },
+
+        startTransfer(orderId) {
+            this.transferFrom = orderId;
+            this.render();
+        },
+
+        cancelTransfer() {
+            this.transferFrom = null;
+            this.render();
+        },
+
+        transfer(orderId, destId) {
+            const o = App.data.orders.find(x => x.id === orderId);
+            const dest = App.data.tables.find(x => x.id === destId);
+            if (!o || !dest || !this.ACTIVE.includes(o.status)) return;
+            if (!this.canReceive(dest)) { App.toast(`La table ${dest.number} n'est pas libre`, 'error'); return; }
+            const src = App.data.tables.find(x => x.id === o.tableId);
+            o.tableId = destId;
+            dest.status = 'occupee';
+            if (src && !this.activeOrders(src.id).length) src.status = 'libre';
+            this.transferFrom = null;
+            this.openId = destId;
+            App.saveData();
+            App.render();
+            App.toast(`Commande #${String(o.number).padStart(3, '0')} transferee${src ? ` de la table ${src.number}` : ''} vers la table ${dest.number}`);
         },
 
         setStatus(id, status) {
             const t = App.data.tables.find(x => x.id === id);
-            if (t) { t.status = status; App.saveData(); App.render(); }
+            if (!t) return;
+            if (status !== 'occupee' && status !== 'reservee' && this.activeOrders(id).length) {
+                App.toast('Cette table a une commande en cours', 'error');
+                return;
+            }
+            t.status = status;
+            App.saveData();
+            App.render();
+        },
+
+        // ---- edition du plan (gerant) ----
+
+        toggleEdit() {
+            this.editMode = !this.editMode;
+            this.transferFrom = null;
+            if (this.editMode) this.openId = null;
+            document.getElementById('floorEditBtn').textContent = this.editMode ? 'Terminer' : 'Modifier le plan';
+            document.getElementById('floorEditHint').hidden = !this.editMode;
+            this.render();
+        },
+
+        dragStart(e, id) {
+            if (!this.editMode) return;
+            const el = e.currentTarget;
+            const area = el.closest('.floor-area');
+            e.preventDefault();
+            el.setPointerCapture(e.pointerId);
+            el.classList.add('dragging');
+            this.drag = { id, el, area };
+            const move = ev => {
+                const r = area.getBoundingClientRect();
+                const x = Math.max(4, Math.min(96, (ev.clientX - r.left) / r.width * 100));
+                const y = Math.max(8, Math.min(92, (ev.clientY - r.top) / r.height * 100));
+                el.style.left = x + '%';
+                el.style.top = y + '%';
+                this.drag.x = x;
+                this.drag.y = y;
+            };
+            const up = () => {
+                el.removeEventListener('pointermove', move);
+                el.removeEventListener('pointerup', up);
+                el.removeEventListener('pointercancel', up);
+                el.classList.remove('dragging');
+                const t = App.data.tables.find(x => x.id === id);
+                if (t && this.drag.x != null) {
+                    t.x = Math.round(this.drag.x * 10) / 10;
+                    t.y = Math.round(this.drag.y * 10) / 10;
+                    App.saveData();
+                }
+                this.drag = null;
+            };
+            el.addEventListener('pointermove', move);
+            el.addEventListener('pointerup', up);
+            el.addEventListener('pointercancel', up);
         },
 
         openAddModal() {
             this.editingId = null;
             document.getElementById('modalTableTitle').textContent = 'Ajouter une table';
-            document.getElementById('tableNumber').value = '';
+            const next = App.data.tables.reduce((m, t) => Math.max(m, t.number), 0) + 1;
+            document.getElementById('tableNumber').value = next;
             document.getElementById('tableSeats').value = 4;
-            document.getElementById('tableLocation').value = 'interieur';
+            document.getElementById('tableLocation').value = 'Interieur';
+            this.fillZones();
             document.getElementById('modalTable').classList.add('open');
+        },
+
+        fillZones() {
+            const labels = new Set(Object.values(this.ZONES));
+            App.data.tables.forEach(t => labels.add(this.zoneLabel(t.location)));
+            document.getElementById('tableZones').innerHTML = [...labels].map(l => `<option value="${App.esc(l)}">`).join('');
         },
 
         edit(id) {
@@ -1387,7 +1637,8 @@ const App = {
             document.getElementById('modalTableTitle').textContent = 'Modifier la table';
             document.getElementById('tableNumber').value = t.number;
             document.getElementById('tableSeats').value = t.seats;
-            document.getElementById('tableLocation').value = t.location;
+            document.getElementById('tableLocation').value = this.zoneLabel(t.location);
+            this.fillZones();
             document.getElementById('modalTable').classList.add('open');
         },
 
@@ -1396,17 +1647,23 @@ const App = {
         },
 
         save() {
-            const number = parseInt(document.getElementById('tableNumber').value);
-            const seats = parseInt(document.getElementById('tableSeats').value);
-            const location = document.getElementById('tableLocation').value;
+            const number = parseInt(document.getElementById('tableNumber').value, 10);
+            const seats = parseInt(document.getElementById('tableSeats').value, 10);
+            const label = document.getElementById('tableLocation').value.trim() || 'Interieur';
             if (!number || !seats) { App.toast('Remplissez tous les champs', 'error'); return; }
+            // Keep the historical keys (interieur, terrasse, vip) so existing tables stay in the same zone.
+            const key = this.zoneKey(label);
+            const location = this.ZONES[key] ? key : label.slice(0, 30);
 
             const duplicate = App.data.tables.find(t => t.number === number && t.id !== this.editingId);
             if (duplicate) { App.toast(`La table ${number} existe deja`, 'error'); return; }
 
             if (this.editingId) {
                 const t = App.data.tables.find(x => x.id === this.editingId);
-                if (t) { t.number = number; t.seats = seats; t.location = location; }
+                if (t) {
+                    if (this.zoneKey(t.location) !== key) { delete t.x; delete t.y; }
+                    t.number = number; t.seats = seats; t.location = location;
+                }
                 App.toast('Table modifiee');
             } else {
                 App.data.tables.push({ id: App.genId(), number, seats, location, status: 'libre' });
@@ -1418,16 +1675,14 @@ const App = {
         },
 
         remove(id) {
-            const hasOrders = App.data.orders.some(o => o.tableId === id && (o.status === 'en_cours' || o.status === 'prete' || o.status === 'servie'));
-            if (hasOrders) { App.toast('Impossible : cette table a des commandes actives', 'error'); return; }
+            if (this.activeOrders(id).length) { App.toast('Impossible : cette table a des commandes actives', 'error'); return; }
             if (!confirm('Supprimer cette table ?')) return;
             App.data.tables = App.data.tables.filter(t => t.id !== id);
+            if (this.openId === id) this.openId = null;
             App.saveData();
             App.toast('Table supprimee');
             App.render();
-        },
-
-        showActions() {}
+        }
     },
 
     // ORDERS
@@ -1574,12 +1829,12 @@ const App = {
         renderTables() {
             const chip = (id, label, cls, badge, selected) => `<button class="pos-table ${cls} ${selected ? 'selected' : ''}" role="option" aria-selected="${selected}"
                 onclick="App.pos.selectTable(${id === null ? 'null' : `'${id}'`})">${label}${badge ? `<small>${badge}</small>` : ''}</button>`;
-            const tables = [...App.data.tables].sort((a, b) => a.number - b.number);
+            const tables = [...App.data.tables].filter(t => t.status !== 'indisponible').sort((a, b) => a.number - b.number);
             document.getElementById('posTables').innerHTML =
                 chip(null, 'A emporter', 'takeaway', '', this.takeaway) +
                 tables.map(t => {
                     const o = this.openOrderFor(t.id);
-                    return chip(t.id, 'T' + t.number, App.esc(t.status), o ? '#' + String(o.number).padStart(3, '0') : '', !this.takeaway && this.tableId === t.id);
+                    return chip(t.id, 'T' + t.number, 'st-' + App.tables.state(t), o ? '#' + String(o.number).padStart(3, '0') : '', !this.takeaway && this.tableId === t.id);
                 }).join('');
 
             const target = this.target();
