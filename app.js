@@ -90,7 +90,7 @@ const App = {
     // Waiters (and anyone not on the kitchen screen) hear and see when a dish is ready to be carried out.
     onOrderEvents(events) {
         if (!this.currentUser || document.body.classList.contains('kitchen-mode')) return;
-        if (!['serveur', 'gerant', 'caissier'].includes(this.currentUser.role)) return;
+        if (!this.can('orders.serve')) return;
         const ready = events.filter(e => e.to === 'prete' && e.from);
         if (!ready.length) return;
         ready.slice(0, 3).forEach(e => {
@@ -138,6 +138,7 @@ const App = {
     },
 
     async loadStaff() {
+        if (!this.can('staff.manage')) { this.staff = []; return; }
         try {
             this.staff = (await this.api('/staff')).staff;
         } catch (e) { /* garde la liste actuelle */ }
@@ -297,6 +298,7 @@ const App = {
                 const pushed = (await this.push()) || fresh;
                 const res = await App.api('/sync?since=' + this.since);
                 this.since = res.now - 5000;
+                if (res.perms) App.setPerms(res.perms);
                 const changed = this.apply(res.records);
                 if (changed) App.render();
                 if (changed || pushed) App.cacheData();
@@ -487,7 +489,7 @@ const App = {
             personnel: 'Gestion du personnel'
         };
         document.getElementById('pageTitle').textContent = titles[page] || page;
-        if (page === 'personnel') this.audit.load();
+        if (page === 'personnel') { this.audit.load(); this.roles.load(); }
         if (window.innerWidth <= 768) {
             document.getElementById('sidebar').classList.remove('open');
         }
@@ -545,10 +547,94 @@ const App = {
         }
     },
 
+    ROLE_LABELS: {
+        proprietaire: 'Proprietaire', gerant: 'Gerant', caissier: 'Caissier', serveur: 'Serveur',
+        cuisinier: 'Cuisinier', stock: 'Gestionnaire de stock', comptable: 'Comptable'
+    },
+
+    roleLabel(r) {
+        return this.ROLE_LABELS[r] || r;
+    },
+
+    roles: {
+        data: null,
+        draft: null,
+        ORDER: ['gerant', 'caissier', 'serveur', 'cuisinier', 'stock', 'comptable', 'proprietaire'],
+
+        async load() {
+            if (!App.can('staff.manage') && !App.can('roles.manage')) return;
+            try {
+                this.data = await App.api('/roles');
+                this.draft = JSON.parse(JSON.stringify(this.data.roles));
+                this.render();
+            } catch (e) {
+                document.getElementById('rolesMatrix').innerHTML = '<p class="empty-state">Roles indisponibles hors connexion</p>';
+            }
+        },
+
+        render() {
+            if (!this.data) return;
+            const editable = App.can('roles.manage');
+            document.getElementById('rolesSave').style.display = editable ? '' : 'none';
+            document.getElementById('rolesReset').style.display = editable ? '' : 'none';
+            document.getElementById('rolesHint').textContent = editable
+                ? 'Cochez ce que chaque role peut faire. Le proprietaire a toujours tous les droits. Les changements s\'appliquent aux appareils connectes en quelques secondes.'
+                : 'Seul le proprietaire peut modifier ces permissions.';
+            const groups = [];
+            this.data.catalog.forEach(p => {
+                let g = groups.find(x => x.name === p.group);
+                if (!g) groups.push(g = { name: p.group, perms: [] });
+                g.perms.push(p);
+            });
+            const head = `<tr><th>Permission</th>${this.ORDER.map(r => `<th class="role-col">${App.esc(App.roleLabel(r))}</th>`).join('')}</tr>`;
+            const rows = groups.map(g => `<tr class="perm-group"><td colspan="${this.ORDER.length + 1}">${App.esc(g.name)}</td></tr>` +
+                g.perms.map(p => `<tr><td>${App.esc(p.label)}</td>${this.ORDER.map(r => {
+                    const locked = !editable || r === 'proprietaire' || p.ownerOnly;
+                    const on = (this.draft[r] || []).includes(p.key);
+                    return `<td class="role-col"><input type="checkbox" ${on ? 'checked' : ''} ${locked ? 'disabled' : ''}
+                        aria-label="${App.esc(App.roleLabel(r) + ' : ' + p.label)}" onchange="App.roles.toggle('${r}', '${p.key}', this.checked)"></td>`;
+                }).join('')}</tr>`).join('')).join('');
+            document.getElementById('rolesMatrix').innerHTML = `<table class="data-table roles-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
+        },
+
+        toggle(role, perm, on) {
+            const list = new Set(this.draft[role] || []);
+            if (on) list.add(perm); else list.delete(perm);
+            this.draft[role] = [...list];
+        },
+
+        resetDefaults() {
+            if (!this.data || !confirm('Revenir aux permissions par defaut pour tous les roles ?')) return;
+            this.draft = { ...JSON.parse(JSON.stringify(this.data.defaults)), proprietaire: this.draft.proprietaire };
+            this.render();
+        },
+
+        async save() {
+            const btn = document.getElementById('rolesSave');
+            btn.disabled = true;
+            try {
+                const roles = {};
+                this.ORDER.filter(r => r !== 'proprietaire').forEach(r => { roles[r] = this.draft[r] || []; });
+                this.data = await App.api('/roles', { method: 'PUT', body: { roles } });
+                this.draft = JSON.parse(JSON.stringify(this.data.roles));
+                this.render();
+                App.toast('Permissions enregistrees');
+                App.audit.load();
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible', 'error');
+            } finally {
+                btn.disabled = false;
+            }
+        }
+    },
+
     audit: {
         labels: {
             creation: 'a cree', modification: 'a modifie', suppression: 'a supprime', refus: 'action refusee :',
-            login: "s'est connecte", login_echec: 'Echec de connexion', mot_de_passe: 'a change son mot de passe'
+            login: "s'est connecte", login_echec: 'Echec de connexion', mot_de_passe: 'a change son mot de passe',
+            roles: 'a modifie les permissions', encaissement: 'a encaisse', remboursement: 'a rembourse',
+            ouverture_caisse: 'a ouvert sa caisse', cloture_caisse: 'a cloture une caisse',
+            achat: 'a enregistre un achat', perte: 'a declare une perte', inventaire: 'a valide un inventaire'
         },
         collections: {
             orders: 'commande', payments: 'paiement', menuItems: 'plat', categories: 'categorie', tables: 'table', staff: 'membre'
@@ -556,7 +642,7 @@ const App = {
 
         async load() {
             const list = document.getElementById('auditList');
-            if (!App.can('page.personnel')) return;
+            if (!App.can('audit.view')) return;
             try {
                 const { entries } = await App.api('/audit?limit=150');
                 list.innerHTML = entries.length ? entries.map(e => this.row(e)).join('') : '<p class="empty-state">Aucune activite</p>';
@@ -572,7 +658,7 @@ const App = {
             let detail = {};
             try { detail = JSON.parse(e.detail) || {}; } catch (err) { /* ignore */ }
             const what = [this.labels[e.action] || e.action];
-            if (e.collection && e.action !== 'login' && e.action !== 'mot_de_passe' && e.action !== 'login_echec') {
+            if (e.collection && ['creation', 'modification', 'suppression', 'refus'].includes(e.action)) {
                 what.push(this.collections[e.collection] || e.collection);
             }
             if (e.action === 'refus') what.push('— ' + (detail.raison || ''));
@@ -700,6 +786,9 @@ const App = {
             App.staff = [];
             localStorage.removeItem('sissiman-user');
             localStorage.removeItem('sissiman-token');
+            // Shared tablets: the next person must not find the previous user's data (payments, stock values) in storage.
+            localStorage.removeItem('restoManagerData');
+            Object.keys(App.data).forEach(k => { App.data[k] = []; });
             App.password.close(true);
             if (App.pos.isOpen()) App.pos.close(true);
         },
@@ -824,35 +913,26 @@ const App = {
         this.updateBadge();
     },
 
-    // Mirrors the server rules in src/worker.js; the server remains the authority.
-    PERMS: {
-        'page.dashboard': ['gerant', 'caissier'],
-        'page.tables': ['gerant', 'caissier', 'serveur'],
-        'page.orders': ['gerant', 'caissier', 'serveur', 'cuisinier'],
-        'page.menu': ['gerant', 'caissier', 'serveur', 'cuisinier'],
-        'page.caisse': ['gerant', 'caissier'],
-        'page.cuisine': ['gerant', 'caissier', 'serveur', 'cuisinier'],
-        'page.rapports': ['gerant'],
-        'page.personnel': ['gerant'],
-        'page.stocks': ['gerant', 'cuisinier'],
-        'stock.manage': ['gerant'],
-        'stock.loss': ['gerant', 'cuisinier'],
-        'tables.manage': ['gerant'],
-        'menu.manage': ['gerant'],
-        'menu.availability': ['gerant', 'cuisinier'],
-        'kitchen.start': ['gerant', 'cuisinier'],
-        'orders.create': ['gerant', 'caissier', 'serveur'],
-        'orders.ready': ['gerant', 'cuisinier', 'serveur'],
-        'orders.serve': ['gerant', 'caissier', 'serveur'],
-        'orders.cancel': ['gerant', 'caissier'],
-        'payments.create': ['gerant', 'caissier'],
-        'cash.session': ['gerant', 'caissier'],
-        'cash.history': ['gerant'],
-        'refunds.create': ['gerant']
+    // Permissions come from the server (login, /me and every sync); these aliases map pages onto them.
+    PAGE_ALIASES: {
+        'page.stocks': ['stock.view'],
+        'page.personnel': ['staff.manage', 'audit.view', 'roles.manage']
     },
+    HOME_BY_ROLE: { cuisinier: 'cuisine', stock: 'stocks', comptable: 'rapports' },
 
     can(perm) {
-        return !!this.currentUser && (this.PERMS[perm] || []).includes(this.currentUser.role);
+        const perms = (this.currentUser && this.currentUser.perms) || [];
+        const alias = this.PAGE_ALIASES[perm];
+        return alias ? alias.some(p => perms.includes(p)) : perms.includes(perm);
+    },
+
+    setPerms(perms) {
+        if (!this.currentUser || !Array.isArray(perms)) return;
+        const before = (this.currentUser.perms || []).slice().sort().join();
+        if (before === perms.slice().sort().join()) return;
+        this.currentUser.perms = perms;
+        localStorage.setItem('sissiman-user', JSON.stringify(this.currentUser));
+        this.render();
     },
 
     applyPermissions() {
@@ -861,8 +941,9 @@ const App = {
         });
         const active = document.querySelector('.nav-item.active');
         if (this.currentUser && active && !this.can('page.' + active.dataset.page)) {
-            const first = this.currentUser.role === 'cuisinier'
-                ? document.querySelector('.nav-item[data-page="cuisine"]')
+            const home = this.HOME_BY_ROLE[this.currentUser.role];
+            const first = home && this.can('page.' + home)
+                ? document.querySelector(`.nav-item[data-page="${home}"]`)
                 : [...document.querySelectorAll('.nav-item')].find(n => this.can('page.' + n.dataset.page));
             if (first) this.navigateTo(first.dataset.page);
         }
@@ -1514,14 +1595,14 @@ const App = {
                         ${App.can('orders.create') ? btn('+ Ajouter des plats', `App.pos.open('${t.id}', '${o.id}')`, 'btn-primary') : ''}
                         ${App.can('page.caisse') && b.remaining > 0 ? btn('Encaisser', `App.tables.goPay('${o.id}')`) : ''}
                         ${btn("Imprimer l'addition", `App.tickets.bill('${o.id}')`)}
-                        ${App.can('orders.create') && !this.transferFrom ? btn('Transferer', `App.tables.startTransfer('${o.id}')`) : ''}
+                        ${App.can('orders.transfer') && !this.transferFrom ? btn('Transferer', `App.tables.startTransfer('${o.id}')`) : ''}
                     </div>
                 </div>`;
             }).join('') : `<p class="drawer-empty">Aucune commande en cours sur cette table.</p>
                 ${App.can('orders.create') && st !== 'indisponible' ? `<div class="drawer-actions">${btn('Prendre la commande', `App.pos.open('${t.id}')`, 'btn-primary')}</div>` : ''}`;
 
             const statusBtns = [];
-            if (!orders.length) {
+            if (!orders.length && App.can('tables.status')) {
                 if (st === 'libre' || st === 'reservee') statusBtns.push(btn('Installer des clients', `App.tables.setStatus('${t.id}','occupee')`));
                 if (st === 'libre') statusBtns.push(btn('Reserver', `App.tables.setStatus('${t.id}','reservee')`));
                 if (st === 'occupee' || st === 'reservee') statusBtns.push(btn('Liberer la table', `App.tables.setStatus('${t.id}','libre')`));
@@ -2252,6 +2333,7 @@ const App = {
                     <div class="menu-item-price">${App.fmt(m.price)}</div>
                     <div class="menu-item-actions">
                         ${App.can('menu.availability') ? `<button class="btn btn-small ${m.available ? 'btn-warning' : 'btn-success'}" onclick="App.menu.toggleAvail('${m.id}')">${m.available ? 'Indispo' : 'Dispo'}</button>` : ''}
+                        ${!App.can('menu.manage') && App.can('stock.manage') ? `<button class="btn btn-small btn-secondary" onclick="App.menu.editItem('${m.id}')">Recette</button>` : ''}
                         ${App.can('menu.manage') ? `<button class="btn btn-small btn-secondary" onclick="App.menu.editItem('${m.id}')">Modifier</button>
                         <button class="btn btn-small btn-danger" onclick="App.menu.removeItem('${m.id}')">Suppr</button>` : ''}
                     </div>
@@ -2425,6 +2507,18 @@ const App = {
                 const q = parseFloat(r.qty);
                 if (!r.ingredientId || !(q > 0)) { App.toast('Recette : chaque ligne doit avoir un ingredient et une quantite', 'error'); return; }
                 recipe.push({ ingredientId: r.ingredientId, qty: q });
+            }
+
+            if (!App.can('menu.manage')) {
+                // Stock managers may only change the recipe; everything else on the dish stays as it is.
+                const m = App.data.menuItems.find(x => x.id === this.editingItemId);
+                if (!m) return;
+                if (recipe.length) m.recipe = recipe; else delete m.recipe;
+                App.saveData();
+                this.closeItemModal();
+                App.render();
+                App.toast('Recette enregistree');
+                return;
             }
 
             const fields = { name, category, price, desc, available };
@@ -3841,25 +3935,26 @@ const App = {
         render() {
             const grid = document.getElementById('personnelGrid');
             const staffList = App.staff;
-            const roleLabels = { gerant: 'Gerant', caissier: 'Caissier', serveur: 'Serveur', cuisinier: 'Cuisinier' };
-            const isGerant = App.currentUser && App.currentUser.role === 'gerant';
+            const canManage = App.can('staff.manage');
+            const owner = App.currentUser && App.currentUser.role === 'proprietaire';
 
             grid.innerHTML = staffList.map(s => {
                 const initials = s.name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
+                const touchable = canManage && (owner || s.role !== 'proprietaire');
                 return `<div class="personnel-card">
                     <div class="personnel-card-header">
-                        <div class="personnel-avatar">${initials}</div>
+                        <div class="personnel-avatar">${App.esc(initials)}</div>
                         <div class="personnel-info">
                             <h4>${App.esc(s.name)}</h4>
-                            <span class="role-badge ${App.esc(s.role)}">${roleLabels[s.role] || s.role}</span>
+                            <span class="role-badge ${App.esc(s.role)}">${App.esc(App.roleLabel(s.role))}</span>
                         </div>
                     </div>
                     <div class="personnel-details">
                         <span>Identifiant : <strong>${App.esc(s.username)}</strong></span>
                     </div>
-                    ${isGerant ? `<div class="personnel-actions">
+                    ${touchable ? `<div class="personnel-actions">
                         <button class="btn btn-small btn-secondary" onclick="App.personnel.edit(${s.id})">Modifier</button>
-                        ${s.id !== 1 && s.id !== App.currentUser.id ? `<button class="btn btn-small btn-danger" onclick="App.personnel.remove(${s.id})">Supprimer</button>` : ''}
+                        ${s.id !== App.currentUser.id ? `<button class="btn btn-small btn-danger" onclick="App.personnel.remove(${s.id})">Supprimer</button>` : ''}
                     </div>` : ''}
                 </div>`;
             }).join('');
@@ -3872,8 +3967,18 @@ const App = {
             document.getElementById('staffUsername').value = '';
             document.getElementById('staffPassword').value = '';
             document.getElementById('staffPassword').placeholder = 'Mot de passe provisoire (8 caracteres min.)';
+            this.prepareRoleSelect(null);
             document.getElementById('staffRole').value = 'serveur';
             document.getElementById('modalPersonnel').classList.add('open');
+        },
+
+        // Only an owner may hand out the owner role; nobody can change their own role.
+        prepareRoleSelect(member) {
+            const sel = document.getElementById('staffRole');
+            const owner = App.currentUser.role === 'proprietaire';
+            sel.querySelector('option[value="proprietaire"]').hidden = !owner;
+            sel.querySelector('option[value="proprietaire"]').disabled = !owner;
+            sel.disabled = !!member && member.id === App.currentUser.id;
         },
 
         edit(id) {
@@ -3885,6 +3990,7 @@ const App = {
             document.getElementById('staffUsername').value = s.username;
             document.getElementById('staffPassword').value = '';
             document.getElementById('staffPassword').placeholder = 'Laisser vide pour ne pas changer';
+            this.prepareRoleSelect(s);
             document.getElementById('staffRole').value = s.role;
             document.getElementById('modalPersonnel').classList.add('open');
         },
@@ -3905,8 +4011,8 @@ const App = {
                 if (this.editingId) {
                     const res = await App.api('/staff/' + this.editingId, { method: 'PUT', body: { name, username, password, role } });
                     if (res.staff.id === App.currentUser.id) {
-                        App.currentUser = res.staff;
-                        localStorage.setItem('sissiman-user', JSON.stringify(res.staff));
+                        App.currentUser = { ...App.currentUser, ...res.staff };
+                        localStorage.setItem('sissiman-user', JSON.stringify(App.currentUser));
                     }
                     App.toast('Membre modifie');
                 } else {

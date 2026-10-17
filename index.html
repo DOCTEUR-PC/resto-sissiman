@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=20261017h">
+    <link rel="stylesheet" href="styles.css?v=20261017i">
 </head>
 <body>
     <!-- LOGIN -->
@@ -558,7 +558,7 @@
 
             <div class="stock-pane" data-pane="achats" hidden>
                 <div class="page-actions">
-                    <button class="btn btn-primary" data-perm="stock.manage" onclick="App.stocks.openPurchase()">+ Nouvel achat</button>
+                    <button class="btn btn-primary" data-perm="stock.purchase" onclick="App.stocks.openPurchase()">+ Nouvel achat</button>
                 </div>
                 <div class="panel"><div class="panel-body table-scroll stock-table-wrap">
                     <table class="data-table">
@@ -570,7 +570,7 @@
 
             <div class="stock-pane" data-pane="inventaires" hidden>
                 <div class="page-actions">
-                    <button class="btn btn-primary" data-perm="stock.manage" onclick="App.stocks.openInventory()">Nouvel inventaire</button>
+                    <button class="btn btn-primary" data-perm="stock.inventory" onclick="App.stocks.openInventory()">Nouvel inventaire</button>
                 </div>
                 <div class="panel"><div class="panel-body table-scroll stock-table-wrap">
                     <table class="data-table">
@@ -697,11 +697,23 @@
         <!-- PERSONNEL -->
         <section class="page" id="page-personnel">
             <div class="page-actions">
-                <button class="btn btn-primary" onclick="App.personnel.openModal()">+ Ajouter un membre</button>
+                <button class="btn btn-primary" data-perm="staff.manage" onclick="App.personnel.openModal()">+ Ajouter un membre</button>
             </div>
-            <div class="personnel-grid" id="personnelGrid"></div>
+            <div class="personnel-grid" id="personnelGrid" data-perm="staff.manage"></div>
 
-            <div class="audit-panel">
+            <div class="audit-panel roles-panel" data-perm="staff.manage">
+                <div class="audit-header">
+                    <h3>Roles et permissions</h3>
+                    <div class="roles-actions">
+                        <button class="btn btn-small btn-secondary" id="rolesReset" onclick="App.roles.resetDefaults()">Valeurs par defaut</button>
+                        <button class="btn btn-small btn-primary" id="rolesSave" onclick="App.roles.save()">Enregistrer</button>
+                    </div>
+                </div>
+                <p class="roles-hint" id="rolesHint"></p>
+                <div class="table-scroll" id="rolesMatrix"><p class="empty-state">Chargement...</p></div>
+            </div>
+
+            <div class="audit-panel" data-perm="audit.view">
                 <div class="audit-header">
                     <h3>Journal d'activite</h3>
                     <button class="btn btn-small btn-secondary" onclick="App.audit.load()">Actualiser</button>
@@ -734,7 +746,10 @@
                                 <option value="serveur">Serveur</option>
                                 <option value="caissier">Caissier</option>
                                 <option value="cuisinier">Cuisinier</option>
+                                <option value="stock">Gestionnaire de stock</option>
+                                <option value="comptable">Comptable</option>
                                 <option value="gerant">Gerant</option>
+                                <option value="proprietaire">Proprietaire</option>
                             </select>
                         </div>
                     </div>
@@ -837,6 +852,6 @@
 
     <div id="printArea" aria-hidden="true"></div>
 
-    <script src="app.js?v=20261017h"></script>
+    <script src="app.js?v=20261017i"></script>
 </body>
 </html>

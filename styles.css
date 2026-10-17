@@ -1895,6 +1895,19 @@ body {
 .role-badge.caissier { background: var(--info-bg); color: var(--info); }
 .role-badge.serveur { background: var(--success-bg); color: var(--success); }
 .role-badge.cuisinier { background: var(--warning-bg); color: var(--warning); }
+.role-badge.proprietaire { background: var(--text); color: var(--surface); }
+.role-badge.stock { background: rgba(124, 58, 237, 0.1); color: #6d28d9; }
+.role-badge.comptable { background: var(--surface-light); color: var(--text-secondary); }
+[data-theme="dark"] .role-badge.stock { color: #9085e9; }
+
+.roles-panel { margin-top: 1.5rem; }
+.roles-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.roles-hint { padding: 0.6rem 1.25rem 0; font-size: 0.82rem; color: var(--text-secondary); }
+.roles-table { font-size: 0.82rem; }
+.roles-table th.role-col, .roles-table td.role-col { text-align: center; white-space: nowrap; padding-left: 0.4rem; padding-right: 0.4rem; }
+.roles-table td.role-col input { width: 18px; height: 18px; accent-color: var(--gold); cursor: pointer; }
+.roles-table td.role-col input:disabled { cursor: not-allowed; }
+.roles-table tr.perm-group td { background: var(--surface-light); font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); }
 
 .personnel-details {
     font-size: 0.85rem;

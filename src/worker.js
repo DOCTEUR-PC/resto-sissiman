@@ -4,7 +4,81 @@ const INGREDIENT_SERVER_FIELDS = ['stock', 'avgCost'];
 const ORDER_SERVER_FIELDS = ['paid', 'refunded', 'paidAt', 'paymentMethod', 'readyAt', 'servedAt'];
 const ACTIVE_ORDER = ['en_cours', 'prete', 'servie'];
 const ID_RE = /^[a-zA-Z0-9_-]{8,60}$/;
-const ROLES = new Set(['gerant', 'caissier', 'serveur', 'cuisinier']);
+const ROLES = new Set(['proprietaire', 'gerant', 'caissier', 'serveur', 'cuisinier', 'stock', 'comptable']);
+
+// Every server-side check refers to one of these keys; roles only bundle them.
+const PERMISSIONS = [
+    ['page.dashboard', 'Voir le tableau de bord', 'Pages'],
+    ['page.tables', 'Voir le plan de salle', 'Pages'],
+    ['page.orders', 'Voir les commandes', 'Pages'],
+    ['page.menu', 'Voir le menu', 'Pages'],
+    ['page.caisse', 'Voir la caisse', 'Pages'],
+    ['page.cuisine', "Voir l'ecran cuisine", 'Pages'],
+    ['page.rapports', 'Voir les rapports', 'Pages'],
+    ['orders.create', 'Prendre et completer des commandes', 'Service'],
+    ['orders.transfer', 'Transferer une commande de table', 'Service'],
+    ['orders.serve', 'Marquer une commande servie', 'Service'],
+    ['orders.cancel', 'Annuler une commande', 'Service'],
+    ['tables.status', 'Changer l\'etat d\'une table (libre, occupee, reservee)', 'Service'],
+    ['tables.manage', 'Creer, modifier et placer les tables', 'Service'],
+    ['kitchen.start', 'Demarrer une commande en cuisine', 'Cuisine'],
+    ['orders.ready', 'Marquer une commande prete', 'Cuisine'],
+    ['menu.availability', 'Rendre un plat disponible ou indisponible', 'Cuisine'],
+    ['menu.manage', 'Modifier le menu et les prix', 'Menu'],
+    ['payments.create', 'Encaisser', 'Caisse'],
+    ['cash.session', 'Ouvrir et cloturer sa caisse', 'Caisse'],
+    ['cash.history', 'Superviser les caisses et leurs ecarts', 'Caisse'],
+    ['refunds.create', 'Effectuer des remboursements', 'Caisse'],
+    ['stock.view', 'Voir les stocks', 'Stocks'],
+    ['stock.manage', 'Gerer les ingredients et les recettes', 'Stocks'],
+    ['stock.purchase', 'Enregistrer les achats fournisseurs', 'Stocks'],
+    ['stock.loss', 'Declarer des pertes', 'Stocks'],
+    ['stock.inventory', 'Valider les inventaires', 'Stocks'],
+    ['reports.view', 'Consulter les chiffres et rapports financiers', 'Gestion'],
+    ['audit.view', "Consulter le journal d'activite", 'Gestion'],
+    ['staff.manage', 'Gerer le personnel', 'Gestion'],
+    ['roles.manage', 'Modifier les roles et permissions', 'Gestion']
+];
+const PERM_KEYS = new Set(PERMISSIONS.map(p => p[0]));
+const OWNER_ONLY = new Set(['roles.manage']);
+const DEFAULT_ROLE_PERMS = {
+    gerant: [...PERM_KEYS].filter(p => !OWNER_ONLY.has(p)),
+    caissier: ['page.dashboard', 'page.tables', 'page.orders', 'page.menu', 'page.caisse', 'page.cuisine',
+        'orders.create', 'orders.transfer', 'orders.serve', 'orders.cancel', 'tables.status', 'payments.create', 'cash.session'],
+    serveur: ['page.tables', 'page.orders', 'page.menu', 'page.cuisine',
+        'orders.create', 'orders.transfer', 'orders.serve', 'orders.ready', 'tables.status'],
+    cuisinier: ['page.orders', 'page.menu', 'page.cuisine', 'kitchen.start', 'orders.ready', 'menu.availability', 'stock.view', 'stock.loss'],
+    stock: ['page.menu', 'menu.availability', 'stock.view', 'stock.manage', 'stock.purchase', 'stock.loss', 'stock.inventory'],
+    comptable: ['page.dashboard', 'page.caisse', 'page.rapports', 'stock.view', 'reports.view', 'cash.history', 'audit.view']
+};
+// Collections a device only receives when the user holds one of these permissions.
+const COLLECTION_PERMS = {
+    payments: ['payments.create', 'cash.history', 'reports.view', 'page.dashboard'],
+    refunds: ['payments.create', 'cash.history', 'reports.view', 'page.dashboard'],
+    cashSessions: ['cash.session', 'cash.history', 'reports.view'],
+    ingredients: ['stock.view', 'menu.manage', 'reports.view'],
+    purchases: ['stock.view', 'reports.view'],
+    inventories: ['stock.view', 'reports.view']
+};
+
+let matrixCache = null;
+async function roleMatrix(db, fresh) {
+    if (!fresh && matrixCache && Date.now() - matrixCache.at < 30000) return matrixCache.matrix;
+    const row = await db.prepare("SELECT value FROM settings WHERE key = 'role_perms'").first();
+    let custom = {};
+    try { custom = row ? JSON.parse(row.value) : {}; } catch { custom = {}; }
+    const matrix = {};
+    for (const r of ROLES) {
+        matrix[r] = r === 'proprietaire' ? [...PERM_KEYS]
+            : Array.isArray(custom[r]) ? custom[r].filter(p => PERM_KEYS.has(p) && !OWNER_ONLY.has(p))
+            : DEFAULT_ROLE_PERMS[r];
+    }
+    matrixCache = { at: Date.now(), matrix };
+    return matrix;
+}
+
+const has = (user, perm) => !!(user && user.perms && user.perms.has(perm));
+const visible = (user, collection) => !COLLECTION_PERMS[collection] || COLLECTION_PERMS[collection].some(p => has(user, p));
 const PAYMENT_METHODS = new Set(['especes', 'mobile', 'carte']);
 const SESSION_TTL = 7 * 24 * 3600 * 1000;
 // Workers free plan caps CPU at ~10 ms per request; keep PBKDF2 cheap enough to fit.
@@ -63,7 +137,7 @@ async function ensureAdmin(db) {
     const salt = randomHex(16);
     await db.prepare(`INSERT INTO staff (username, name, role, pass_hash, pass_salt, created_at, must_change_pw)
         VALUES (?, ?, ?, ?, ?, ?, 1)`)
-        .bind('admin', 'Administrateur', 'gerant', await hashPassword(DEFAULT_ADMIN_PASSWORD, salt), salt, Date.now()).run();
+        .bind('admin', 'Administrateur', 'proprietaire', await hashPassword(DEFAULT_ADMIN_PASSWORD, salt), salt, Date.now()).run();
 }
 
 async function getUser(request, db) {
@@ -117,7 +191,7 @@ async function login(request, db) {
         db.prepare('UPDATE staff SET must_change_pw = ? WHERE id = ?').bind(mustChange ? 1 : 0, s.id),
         auditStmt(db, s, 'login', 'staff', s.id, { ip })
     ]);
-    return json({ token, user: publicStaff(s), mustChangePassword: mustChange });
+    return json({ token, user: { ...publicStaff(s), perms: (await roleMatrix(db))[s.role] || [] }, mustChangePassword: mustChange });
 }
 
 async function changeOwnPassword(request, db, user) {
@@ -141,18 +215,18 @@ async function changeOwnPassword(request, db, user) {
 
 // ---------- SYNC ----------
 
-async function pull(url, db) {
+async function pull(url, db, user) {
     const since = Math.max(0, parseInt(url.searchParams.get('since'), 10) || 0);
     const now = Date.now();
     const stmt = since === 0
         ? db.prepare('SELECT collection, id, data, deleted FROM records WHERE deleted = 0')
         : db.prepare('SELECT collection, id, data, deleted FROM records WHERE updated_at >= ?').bind(since);
     const { results } = await stmt.all();
-    return json({ now, records: results });
+    // perms travel with every pull so a change made by the owner reaches open devices within seconds.
+    return json({ now, perms: [...user.perms], records: results.filter(r => visible(user, r.collection)) });
 }
 
 const isInt = (n, min, max) => Number.isInteger(n) && n >= min && n <= max;
-const can = (user, ...roles) => roles.includes(user.role);
 
 function changedFields(before, after) {
     const keys = new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
@@ -167,11 +241,11 @@ function changedFields(before, after) {
 
 // "payee" is only reachable through POST /api/payments.
 const ORDER_TRANSITIONS = {
-    'en_cours>prete': ['gerant', 'cuisinier', 'serveur'],
-    'prete>servie': ['gerant', 'serveur', 'caissier'],
-    'en_cours>annulee': ['gerant', 'caissier'],
-    'prete>annulee': ['gerant', 'caissier'],
-    'servie>annulee': ['gerant', 'caissier']
+    'en_cours>prete': 'orders.ready',
+    'prete>servie': 'orders.serve',
+    'en_cours>annulee': 'orders.cancel',
+    'prete>annulee': 'orders.cancel',
+    'servie>annulee': 'orders.cancel'
 };
 const ORDER_MUTABLE = new Set(['status', 'startedAt', 'tableId']);
 const TABLE_STATUSES = new Set(['libre', 'occupee', 'reservee', 'indisponible']);
@@ -254,10 +328,10 @@ async function checkChange(c, ctx) {
 
     switch (c.collection) {
         case 'categories':
-            return can(user, 'gerant') ? null : 'Seul le gerant peut modifier les categories';
+            return has(user, 'menu.manage') ? null : 'Vous ne pouvez pas modifier les categories';
 
         case 'ingredients': {
-            if (!can(user, 'gerant')) return 'Seul le gerant peut gerer les ingredients';
+            if (!has(user, 'stock.manage')) return 'Vous ne pouvez pas gerer les ingredients';
             if (!after) {
                 const used = await ctx.db.prepare(`SELECT json_extract(data, '$.name') AS name FROM records WHERE collection = 'menuItems'
                     AND deleted = 0 AND data LIKE ? LIMIT 1`).bind(`%"ingredientId":"${c.id}"%`).first();
@@ -267,7 +341,8 @@ async function checkChange(c, ctx) {
         }
 
         case 'menuItems': {
-            if (can(user, 'gerant')) {
+            const recipeOnly = before && after && onlyChanged(new Set(['recipe']));
+            if (has(user, 'menu.manage') || (recipeOnly && has(user, 'stock.manage'))) {
                 if (!after) return null;
                 const err = validateMenuItem(after) || validateRecipe(after.recipe);
                 if (err) return err;
@@ -276,19 +351,19 @@ async function checkChange(c, ctx) {
                 }
                 return null;
             }
-            if (before && after && can(user, 'cuisinier') && onlyChanged(new Set(['available']))) return null;
-            return 'Seul le gerant peut modifier le menu et les prix';
+            if (before && after && has(user, 'menu.availability') && onlyChanged(new Set(['available']))) return null;
+            return 'Vous ne pouvez pas modifier le menu et les prix';
         }
 
         case 'tables': {
             if (after && !TABLE_STATUSES.has(after.status)) return 'Etat de table invalide';
             const becomesOff = after && after.status === 'indisponible' && (!before || before.status !== 'indisponible');
             if (becomesOff) {
-                if (!can(user, 'gerant')) return 'Seul le gerant peut rendre une table indisponible';
+                if (!has(user, 'tables.manage')) return 'Vous ne pouvez pas rendre une table indisponible';
                 if (await ctx.activeOrdersOn(c.id) > 0) return 'Cette table a une commande en cours';
             }
             if (!after && before && await ctx.activeOrdersOn(c.id) > 0) return 'Cette table a une commande en cours';
-            if (can(user, 'gerant')) {
+            if (has(user, 'tables.manage')) {
                 if (!after) return null;
                 if (!isInt(after.number, 1, 9999) || !isInt(after.seats, 1, 60)) return 'Numero ou nombre de places invalide';
                 if (typeof after.location !== 'string' || after.location.length > 30) return 'Zone invalide';
@@ -297,11 +372,11 @@ async function checkChange(c, ctx) {
                 }
                 return null;
             }
-            if (before && after && onlyChanged(new Set(['status']))) {
-                if (before.status === 'indisponible') return 'Seul le gerant peut remettre cette table en service';
+            if (before && after && onlyChanged(new Set(['status'])) && has(user, 'tables.status')) {
+                if (before.status === 'indisponible') return 'Vous ne pouvez pas remettre cette table en service';
                 return null;
             }
-            return 'Seul le gerant peut creer, modifier ou supprimer des tables';
+            return 'Vous ne pouvez pas creer, modifier ou supprimer des tables';
         }
 
         case 'payments':
@@ -315,7 +390,7 @@ async function checkChange(c, ctx) {
         case 'orders': {
             if (!after) return 'Une commande ne peut pas etre supprimee, annulez-la';
             if (!before) {
-                if (!can(user, 'gerant', 'serveur', 'caissier')) return "Vous n'etes pas autorise a prendre des commandes";
+                if (!has(user, 'orders.create')) return "Vous n'etes pas autorise a prendre des commandes";
                 if (after.status !== 'en_cours') return 'Statut initial invalide';
                 if (!isInt(after.number, 1, 1e9)) return 'Numero de commande invalide';
                 if (!Array.isArray(after.items) || after.items.length === 0 || after.items.length > 100) return 'Articles invalides';
@@ -327,7 +402,7 @@ async function checkChange(c, ctx) {
             }
             if ('items' in diff || 'total' in diff) {
                 // Only appending lines to an open order is allowed; existing lines stay untouched.
-                if (!can(user, 'gerant', 'serveur', 'caissier')) return "Vous n'etes pas autorise a modifier une commande";
+                if (!has(user, 'orders.create')) return "Vous n'etes pas autorise a modifier une commande";
                 if (!ACTIVE_ORDER.includes(before.status)) return 'Cette commande est cloturee, creez-en une nouvelle';
                 if (!onlyChanged(new Set(['items', 'total', 'status', 'note']))) return 'Modification non autorisee';
                 if ('note' in diff && (typeof after.note !== 'string' || after.note.length > 600 || !after.note.startsWith(before.note || ''))) {
@@ -347,11 +422,11 @@ async function checkChange(c, ctx) {
             }
             if (!onlyChanged(ORDER_MUTABLE)) return 'Les articles et le total ne peuvent plus etre modifies';
             if ('startedAt' in diff) {
-                if (!can(user, 'gerant', 'cuisinier')) return 'Seule la cuisine peut demarrer une commande';
+                if (!has(user, 'kitchen.start')) return 'Seule la cuisine peut demarrer une commande';
                 if (before.status !== 'en_cours') return 'Cette commande a deja quitte la cuisine';
             }
             if ('tableId' in diff) {
-                if (!can(user, 'gerant', 'serveur', 'caissier')) return "Vous n'etes pas autorise a transferer une commande";
+                if (!has(user, 'orders.transfer')) return "Vous n'etes pas autorise a transferer une commande";
                 if (!ACTIVE_ORDER.includes(before.status) || 'status' in diff) return 'Seule une commande en cours peut etre transferee';
                 const dest = await ctx.lookup('tables', after.tableId);
                 if (!dest) return 'Table de destination introuvable';
@@ -359,10 +434,10 @@ async function checkChange(c, ctx) {
                 if (await ctx.activeOrdersOn(after.tableId, c.id) > 0) return `La table ${dest.number} a deja une commande en cours`;
             }
             if (!('status' in diff)) return null;
-            const roles = ORDER_TRANSITIONS[before.status + '>' + after.status];
+            const needed = ORDER_TRANSITIONS[before.status + '>' + after.status];
             if (after.status === 'payee') return "Une commande passe a « payee » uniquement par l'encaissement";
-            if (!roles) return `Passage de "${before.status}" a "${after.status}" impossible`;
-            if (!roles.includes(user.role)) return 'Votre role ne permet pas ce changement de statut';
+            if (!needed) return `Passage de "${before.status}" a "${after.status}" impossible`;
+            if (!has(user, needed)) return 'Votre role ne permet pas ce changement de statut';
             if (after.status === 'annulee' && (before.paid || 0) - (before.refunded || 0) > 0) {
                 return 'Cette commande a des paiements : remboursez-les avant de l\'annuler';
             }
@@ -549,7 +624,7 @@ async function orderStockStmts(db, c, ctx, user, now) {
 }
 
 async function createPurchase(request, db, user) {
-    if (!can(user, 'gerant')) return fail(403, 'Seul le gerant peut enregistrer un achat');
+    if (!has(user, 'stock.purchase')) return fail(403, "Vous ne pouvez pas enregistrer d'achat");
     const body = await readBody(request);
     if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
     const dup = await getRecord(db, 'purchases', body.id);
@@ -605,7 +680,7 @@ async function ingredientRecords(db, ids) {
 }
 
 async function createLoss(request, db, user) {
-    if (!can(user, 'gerant', 'cuisinier')) return fail(403, 'Non autorise');
+    if (!has(user, 'stock.loss')) return fail(403, 'Vous ne pouvez pas declarer de perte');
     const body = await readBody(request);
     if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
     const ing = await getRecord(db, 'ingredients', body.ingredientId);
@@ -626,7 +701,7 @@ async function createLoss(request, db, user) {
 }
 
 async function createInventory(request, db, user) {
-    if (!can(user, 'gerant')) return fail(403, "Seul le gerant peut valider un inventaire");
+    if (!has(user, 'stock.inventory')) return fail(403, "Vous ne pouvez pas valider d'inventaire");
     const body = await readBody(request);
     if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
     const dup = await getRecord(db, 'inventories', body.id);
@@ -683,7 +758,7 @@ function summarize(collection, rec) {
 }
 
 async function nextOrderNumber(request, db, user) {
-    if (!can(user, 'gerant', 'serveur', 'caissier')) return fail(403, "Vous n'etes pas autorise a prendre des commandes");
+    if (!has(user, 'orders.create')) return fail(403, "Vous n'etes pas autorise a prendre des commandes");
     const body = await readBody(request);
     const min = Math.max(1, parseInt(body && body.min, 10) || 1);
     const row = await db.prepare(`INSERT INTO counters (name, value) VALUES ('order', ?)
@@ -724,7 +799,7 @@ const isUniqueError = e => String(e).includes('UNIQUE') || String(e).includes('P
 const CONFLICT = 'Cette operation a ete modifiee en meme temps sur un autre poste. Reessayez.';
 
 async function openCash(request, db, user) {
-    if (!can(user, 'gerant', 'caissier')) return fail(403, 'Reserve au caissier et au gerant');
+    if (!has(user, 'cash.session')) return fail(403, 'Vous ne pouvez pas gerer de caisse');
     const body = await readBody(request);
     if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
     if (!isInt(body.openingFloat, 0, 100000000)) return fail(400, 'Fonds de caisse invalide');
@@ -759,12 +834,12 @@ async function sessionTotals(db, sessionId) {
 }
 
 async function closeCash(request, db, user) {
-    if (!can(user, 'gerant', 'caissier')) return fail(403, 'Reserve au caissier et au gerant');
+    if (!has(user, 'cash.session')) return fail(403, 'Vous ne pouvez pas gerer de caisse');
     const body = await readBody(request);
     const s = body && await getRecord(db, 'cashSessions', body.sessionId);
     if (!s) return fail(404, 'Session de caisse introuvable');
     if (s.obj.status !== 'ouverte') return fail(409, 'Cette caisse est deja cloturee');
-    if (s.obj.staffId !== user.id && user.role !== 'gerant') return fail(403, "Seul le gerant peut cloturer la caisse d'un autre");
+    if (s.obj.staffId !== user.id && !has(user, 'cash.history')) return fail(403, "Vous ne pouvez pas cloturer la caisse d'un autre");
     if (!isInt(body.countedCash, 0, 1000000000)) return fail(400, 'Montant compte invalide');
     const note = typeof body.note === 'string' ? body.note.trim().slice(0, 300) : '';
 
@@ -782,7 +857,7 @@ async function closeCash(request, db, user) {
 }
 
 async function createPayment(request, db, user) {
-    if (!can(user, 'gerant', 'caissier')) return fail(403, 'Seuls le caissier et le gerant peuvent encaisser');
+    if (!has(user, 'payments.create')) return fail(403, 'Vous ne pouvez pas encaisser');
     const body = await readBody(request);
     if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
     const lines = Array.isArray(body.lines) ? body.lines : [];
@@ -862,7 +937,7 @@ async function createPayment(request, db, user) {
 }
 
 async function createRefund(request, db, user) {
-    if (!can(user, 'gerant')) return fail(403, 'Seul le gerant peut effectuer un remboursement');
+    if (!has(user, 'refunds.create')) return fail(403, 'Vous ne pouvez pas effectuer de remboursement');
     const body = await readBody(request);
     if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
     const dup = await getRecord(db, 'refunds', body.id);
@@ -920,10 +995,13 @@ function validateStaff(body, creating) {
     return null;
 }
 
+const ownerCount = async db => (await db.prepare("SELECT COUNT(*) AS n FROM staff WHERE role = 'proprietaire'").first()).n;
+
 async function createStaff(request, db, user) {
     const body = await readBody(request);
     const error = validateStaff(body, true);
     if (error) return fail(400, error);
+    if (body.role === 'proprietaire' && user.role !== 'proprietaire') return fail(403, 'Seul un proprietaire peut creer un compte proprietaire');
     const salt = randomHex(16);
     try {
         const row = await db.prepare(`INSERT INTO staff (username, name, role, pass_hash, pass_salt, created_at, must_change_pw)
@@ -943,7 +1021,15 @@ async function updateStaff(request, db, id, user) {
     if (error) return fail(400, error);
     const before = await db.prepare('SELECT id, username, name, role FROM staff WHERE id = ?').bind(id).first();
     if (!before) return fail(404, 'Membre introuvable');
-    const role = id === 1 ? 'gerant' : body.role;
+    const role = body.role;
+    // Nobody can raise themselves or someone else to owner, or touch an owner account, without being an owner.
+    if ((before.role === 'proprietaire' || role === 'proprietaire') && user.role !== 'proprietaire') {
+        return fail(403, 'Seul un proprietaire peut modifier un compte proprietaire');
+    }
+    if (id === user.id && role !== before.role) return fail(403, 'Vous ne pouvez pas changer votre propre role');
+    if (before.role === 'proprietaire' && role !== 'proprietaire' && await ownerCount(db) <= 1) {
+        return fail(409, 'Il doit rester au moins un proprietaire');
+    }
     const stmts = [];
     if (body.password) {
         const salt = randomHex(16);
@@ -969,10 +1055,13 @@ async function updateStaff(request, db, id, user) {
 }
 
 async function deleteStaff(db, id, user) {
-    if (id === 1) return fail(403, "Le compte administrateur ne peut pas etre supprime");
     if (id === user.id) return fail(403, 'Vous ne pouvez pas supprimer votre propre compte');
     const before = await db.prepare('SELECT name, username, role FROM staff WHERE id = ?').bind(id).first();
     if (!before) return fail(404, 'Membre introuvable');
+    if (before.role === 'proprietaire') {
+        if (user.role !== 'proprietaire') return fail(403, 'Seul un proprietaire peut supprimer un compte proprietaire');
+        if (await ownerCount(db) <= 1) return fail(409, 'Il doit rester au moins un proprietaire');
+    }
     await db.batch([
         db.prepare('DELETE FROM sessions WHERE staff_id = ?').bind(id),
         db.prepare('DELETE FROM staff WHERE id = ?').bind(id),
@@ -986,6 +1075,40 @@ async function listAudit(url, db) {
     const { results } = await db.prepare(`SELECT id, at, staff_name, action, collection, record_id, detail
         FROM audit ORDER BY id DESC LIMIT ?`).bind(limit).all();
     return json({ entries: results });
+}
+
+// ---------- ROLES ----------
+
+async function getRoles(db) {
+    return json({
+        catalog: PERMISSIONS.map(([key, label, group]) => ({ key, label, group, ownerOnly: OWNER_ONLY.has(key) })),
+        roles: await roleMatrix(db, true),
+        defaults: DEFAULT_ROLE_PERMS
+    });
+}
+
+async function updateRoles(request, db, user) {
+    const body = await readBody(request);
+    const roles = body && body.roles && typeof body.roles === 'object' ? body.roles : null;
+    if (!roles) return fail(400, 'Donnees invalides');
+    const custom = {};
+    for (const r of ROLES) {
+        if (r === 'proprietaire') continue;
+        const list = Array.isArray(roles[r]) ? roles[r] : DEFAULT_ROLE_PERMS[r];
+        if (list.some(p => !PERM_KEYS.has(p))) return fail(400, 'Permission inconnue');
+        custom[r] = [...new Set(list.filter(p => !OWNER_ONLY.has(p)))];
+    }
+    const before = await roleMatrix(db, true);
+    await db.batch([
+        db.prepare(`INSERT INTO settings (key, value) VALUES ('role_perms', ?)
+            ON CONFLICT (key) DO UPDATE SET value = excluded.value`).bind(JSON.stringify(custom)),
+        auditStmt(db, user, 'roles', 'staff', null, Object.fromEntries(Object.keys(custom).map(r => {
+            const added = custom[r].filter(p => !before[r].includes(p));
+            const removed = before[r].filter(p => !custom[r].includes(p));
+            return [r, added.length || removed.length ? `+${added.join(',')} -${removed.join(',')}` : '='];
+        }).filter(([, v]) => v !== '=')))
+    ]);
+    return getRoles(db);
 }
 
 // ---------- ROUTER ----------
@@ -1014,8 +1137,10 @@ async function handleApi(request, env, url) {
 
         const user = await getUser(request, db);
         if (!user) return fail(401, 'Session expiree');
+        user.perms = new Set((await roleMatrix(db))[user.role] || []);
+        const me = () => ({ ...publicStaff(user), perms: [...user.perms] });
 
-        if (route === '/me' && method === 'GET') return json({ user: publicStaff(user), mustChangePassword: user.must_change_pw === 1 });
+        if (route === '/me' && method === 'GET') return json({ user: me(), mustChangePassword: user.must_change_pw === 1 });
         if (route === '/logout' && method === 'POST') {
             const token = request.headers.get('Authorization').slice(7);
             await db.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(await sha256(token)).run();
@@ -1024,7 +1149,7 @@ async function handleApi(request, env, url) {
         if (route === '/password' && method === 'POST') return await changeOwnPassword(request, db, user);
         if (user.must_change_pw === 1) return fail(403, 'Changement de mot de passe requis');
 
-        if (route === '/sync' && method === 'GET') return await pull(url, db);
+        if (route === '/sync' && method === 'GET') return await pull(url, db, user);
         if (route === '/sync' && method === 'POST') return await push(request, db, user);
         if (route === '/orders/next-number' && method === 'POST') return await nextOrderNumber(request, db, user);
         if (route === '/cash/open' && method === 'POST') return await openCash(request, db, user);
@@ -1035,21 +1160,29 @@ async function handleApi(request, env, url) {
         if (route === '/stock/loss' && method === 'POST') return await createLoss(request, db, user);
         if (route === '/inventories' && method === 'POST') return await createInventory(request, db, user);
         if (route === '/stock/moves' && method === 'GET') {
-            if (!can(user, 'gerant', 'cuisinier')) return fail(403, 'Non autorise');
+            if (!has(user, 'stock.view')) return fail(403, 'Non autorise');
             return await listMoves(url, db);
         }
 
-        if (route === '/staff' && method === 'GET') {
-            const { results } = await db.prepare('SELECT id, username, name, role FROM staff ORDER BY id').all();
-            return json({ staff: results });
+        if (route === '/roles' && method === 'GET') {
+            if (!has(user, 'staff.manage') && !has(user, 'roles.manage')) return fail(403, 'Non autorise');
+            return await getRoles(db);
+        }
+        if (route === '/roles' && method === 'PUT') {
+            if (!has(user, 'roles.manage')) return fail(403, 'Seul le proprietaire peut modifier les roles');
+            return await updateRoles(request, db, user);
         }
         if (route === '/audit' && method === 'GET') {
-            if (user.role !== 'gerant') return fail(403, 'Reserve au gerant');
+            if (!has(user, 'audit.view')) return fail(403, "Vous ne pouvez pas consulter le journal");
             return await listAudit(url, db);
         }
         const sm = route.match(/^\/staff(?:\/(\d+))?$/);
         if (sm) {
-            if (user.role !== 'gerant') return fail(403, 'Reserve au gerant');
+            if (!has(user, 'staff.manage')) return fail(403, 'Vous ne pouvez pas gerer le personnel');
+            if (!sm[1] && method === 'GET') {
+                const { results } = await db.prepare('SELECT id, username, name, role FROM staff ORDER BY id').all();
+                return json({ staff: results });
+            }
             if (!sm[1] && method === 'POST') return await createStaff(request, db, user);
             const id = parseInt(sm[1], 10);
             if (sm[1] && method === 'PUT') return await updateStaff(request, db, id, user);

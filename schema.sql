@@ -63,3 +63,8 @@ CREATE TABLE IF NOT EXISTS stock_moves (
 );
 CREATE INDEX IF NOT EXISTS idx_moves_ingredient ON stock_moves (ingredient_id, at);
 CREATE INDEX IF NOT EXISTS idx_moves_ref ON stock_moves (ref);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
