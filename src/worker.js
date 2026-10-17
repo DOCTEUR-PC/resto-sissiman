@@ -1,5 +1,6 @@
-const COLLECTIONS = new Set(['tables', 'categories', 'menuItems', 'orders', 'payments', 'refunds', 'cashSessions']);
-const SERVER_ONLY = new Set(['payments', 'refunds', 'cashSessions']);
+const COLLECTIONS = new Set(['tables', 'categories', 'menuItems', 'orders', 'payments', 'refunds', 'cashSessions',
+    'ingredients', 'purchases', 'inventories']);
+const INGREDIENT_SERVER_FIELDS = ['stock', 'avgCost'];
 const ORDER_SERVER_FIELDS = ['paid', 'refunded', 'paidAt', 'paymentMethod', 'readyAt', 'servedAt'];
 const ACTIVE_ORDER = ['en_cours', 'prete', 'servie'];
 const ID_RE = /^[a-zA-Z0-9_-]{8,60}$/;
@@ -192,6 +193,25 @@ function validateMenuItem(m) {
     return null;
 }
 
+const isQty = (n, max = 100000) => typeof n === 'number' && Number.isFinite(n) && n > 0 && n <= max;
+const round4 = n => Math.round(n * 10000) / 10000;
+
+function validateRecipe(recipe) {
+    if (recipe == null) return null;
+    if (!Array.isArray(recipe) || recipe.length > 30) return 'Recette invalide';
+    for (const r of recipe) {
+        if (!r || typeof r.ingredientId !== 'string' || !isQty(r.qty)) return 'Ligne de recette invalide';
+    }
+    return null;
+}
+
+function validateIngredient(i) {
+    if (!isShortText(i.name, 60)) return "Nom d'ingredient invalide";
+    if (!isShortText(i.unit, 15)) return 'Unite invalide';
+    if (!(typeof i.threshold === 'number' && i.threshold >= 0 && i.threshold <= 1000000)) return 'Seuil invalide';
+    return null;
+}
+
 // Prices always come from the server's copy of the menu; the client's figures must match them exactly.
 async function validateOrderLines(items, lookup) {
     let total = 0;
@@ -236,8 +256,26 @@ async function checkChange(c, ctx) {
         case 'categories':
             return can(user, 'gerant') ? null : 'Seul le gerant peut modifier les categories';
 
+        case 'ingredients': {
+            if (!can(user, 'gerant')) return 'Seul le gerant peut gerer les ingredients';
+            if (!after) {
+                const used = await ctx.db.prepare(`SELECT json_extract(data, '$.name') AS name FROM records WHERE collection = 'menuItems'
+                    AND deleted = 0 AND data LIKE ? LIMIT 1`).bind(`%"ingredientId":"${c.id}"%`).first();
+                return used ? `Ingredient utilise dans la recette « ${used.name} »` : null;
+            }
+            return validateIngredient(after);
+        }
+
         case 'menuItems': {
-            if (can(user, 'gerant')) return after ? validateMenuItem(after) : null;
+            if (can(user, 'gerant')) {
+                if (!after) return null;
+                const err = validateMenuItem(after) || validateRecipe(after.recipe);
+                if (err) return err;
+                for (const r of after.recipe || []) {
+                    if (!(await ctx.lookup('ingredients', r.ingredientId))) return 'Ingredient de recette introuvable';
+                }
+                return null;
+            }
             if (before && after && can(user, 'cuisinier') && onlyChanged(new Set(['available']))) return null;
             return 'Seul le gerant peut modifier le menu et les prix';
         }
@@ -270,6 +308,9 @@ async function checkChange(c, ctx) {
         case 'refunds':
         case 'cashSessions':
             return 'Les operations de caisse doivent passer par l\'ecran Caisse';
+        case 'purchases':
+        case 'inventories':
+            return 'Les achats et inventaires doivent passer par l\'ecran Stocks';
 
         case 'orders': {
             if (!after) return 'Une commande ne peut pas etre supprimee, annulez-la';
@@ -367,22 +408,25 @@ async function push(request, db, user) {
     for (const c of changes) {
         c.before = existing.get(c.key) || null;
         // Payment fields on orders belong to the server; a client's stale copy must not overwrite them.
-        if (c.collection === 'orders' && c.after) {
-            for (const f of ORDER_SERVER_FIELDS) {
+        const serverFields = c.collection === 'orders' ? ORDER_SERVER_FIELDS : c.collection === 'ingredients' ? INGREDIENT_SERVER_FIELDS : null;
+        if (serverFields && c.after) {
+            for (const f of serverFields) {
                 if (c.before && f in c.before) c.after[f] = c.before[f]; else delete c.after[f];
             }
+            if (c.collection === 'ingredients' && !c.before) { c.after.stock = 0; c.after.avgCost = 0; }
             c.data = JSON.stringify(c.after);
         }
     }
 
     // Menu and tables first so a new order can reference items created in the same batch.
-    const rank = { categories: 0, menuItems: 1, tables: 2, orders: 3, payments: 4, refunds: 4, cashSessions: 4 };
+    const rank = { ingredients: -1, categories: 0, menuItems: 1, tables: 2, orders: 3, payments: 4, refunds: 4, cashSessions: 4, purchases: 4, inventories: 4 };
     const ordered = [...changes].sort((a, b) => rank[a.collection] - rank[b.collection]);
 
     const accepted = new Map();
     const extraCache = new Map();
     const ctx = {
         user,
+        db,
         async lookup(collection, id) {
             if (typeof id !== 'string' || !id) return null;
             const key = collection + '\u0000' + id;
@@ -431,6 +475,9 @@ async function push(request, db, user) {
     }
     const stmts = [];
     for (const c of accepted.values()) {
+        if (c.collection === 'orders') stmts.push(...await orderStockStmts(db, c, ctx, user, now));
+    }
+    for (const c of accepted.values()) {
         const diff = changedFields(c.before, c.after);
         if (Object.keys(diff).length === 0) continue;
         stmts.push(db.prepare(`INSERT INTO records (collection, id, data, deleted, updated_at) VALUES (?, ?, ?, ?, ?)
@@ -455,6 +502,174 @@ async function push(request, db, user) {
             data: r.c.before ? JSON.stringify(r.c.before) : null
         }))
     });
+}
+
+// ---------- STOCKS ----------
+
+function stockMoveStmts(db, { ingredientId, qty, kind, ref, unitCost, user, note, clientId, now }) {
+    return [
+        db.prepare(`INSERT INTO stock_moves (client_id, at, ingredient_id, qty, kind, ref, unit_cost, staff_id, staff_name, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            .bind(clientId || null, now, ingredientId, round4(qty), kind, ref || null, unitCost == null ? null : unitCost,
+                user ? user.id : null, user ? user.name : null, note || null),
+        // Applied as a delta in SQL so concurrent sales and purchases never overwrite each other.
+        db.prepare(`UPDATE records SET updated_at = ?, data = json_set(data, '$.stock', ROUND(COALESCE(json_extract(data, '$.stock'), 0) + ?, 4))
+            WHERE collection = 'ingredients' AND id = ? AND deleted = 0`).bind(now, round4(qty), ingredientId)
+    ];
+}
+
+// Theoretical consumption: recipes are applied when lines reach the kitchen and given back if the order is cancelled.
+async function orderStockStmts(db, c, ctx, user, now) {
+    if (!c.after) return [];
+    const consume = async items => {
+        const m = new Map();
+        for (const it of items || []) {
+            const mi = await ctx.lookup('menuItems', it.menuId);
+            for (const r of (mi && mi.recipe) || []) m.set(r.ingredientId, (m.get(r.ingredientId) || 0) - r.qty * it.qty);
+        }
+        return m;
+    };
+    let deltas = new Map(), kind = 'vente';
+    if (!c.before) {
+        if (c.after.status !== 'annulee') deltas = await consume(c.after.items);
+    } else if (c.after.status === 'annulee' && c.before.status !== 'annulee') {
+        const { results } = await db.prepare(`SELECT ingredient_id, SUM(qty) AS q FROM stock_moves
+            WHERE ref = ? AND kind IN ('vente', 'annulation') GROUP BY ingredient_id`).bind(c.id).all();
+        deltas = new Map(results.map(r => [r.ingredient_id, -r.q]));
+        kind = 'annulation';
+    } else if ((c.after.items || []).length > (c.before.items || []).length) {
+        deltas = await consume(c.after.items.slice(c.before.items.length));
+    }
+    const out = [];
+    for (const [ingredientId, qty] of deltas) {
+        if (Math.abs(qty) < 1e-9) continue;
+        out.push(...stockMoveStmts(db, { ingredientId, qty, kind, ref: c.id, user, now }));
+    }
+    return out;
+}
+
+async function createPurchase(request, db, user) {
+    if (!can(user, 'gerant')) return fail(403, 'Seul le gerant peut enregistrer un achat');
+    const body = await readBody(request);
+    if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
+    const dup = await getRecord(db, 'purchases', body.id);
+    if (dup) return json({ duplicate: true, records: [rec('purchases', dup.obj)] });
+    const supplier = typeof body.supplier === 'string' ? body.supplier.trim().slice(0, 80) : '';
+    if (!supplier) return fail(400, 'Indiquez le fournisseur');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(body.date || '')) return fail(400, 'Date invalide');
+    const lines = Array.isArray(body.lines) ? body.lines : [];
+    if (!lines.length || lines.length > 50) return fail(400, 'Ajoutez entre 1 et 50 lignes');
+    const now = Date.now();
+    const clean = [];
+    const stmts = [];
+    for (const l of lines) {
+        const ing = l && await getRecord(db, 'ingredients', l.ingredientId);
+        if (!ing) return fail(400, 'Ingredient introuvable');
+        if (!isQty(l.qty)) return fail(400, `Quantite invalide pour ${ing.obj.name}`);
+        if (!isInt(l.unitPrice, 0, 100000000)) return fail(400, `Prix invalide pour ${ing.obj.name}`);
+        clean.push({ ingredientId: ing.obj.id, name: ing.obj.name, unit: ing.obj.unit, qty: round4(l.qty), unitPrice: l.unitPrice, total: Math.round(l.qty * l.unitPrice) });
+        stmts.push(db.prepare(`INSERT INTO stock_moves (at, ingredient_id, qty, kind, ref, unit_cost, staff_id, staff_name, note)
+            VALUES (?, ?, ?, 'achat', ?, ?, ?, ?, ?)`).bind(now, ing.obj.id, round4(l.qty), body.id, l.unitPrice, user.id, user.name, supplier));
+        // Weighted average cost; a negative theoretical stock counts as zero so it cannot distort the average.
+        stmts.push(db.prepare(`UPDATE records SET updated_at = ?, data = json_set(data,
+                '$.avgCost', ROUND((MAX(COALESCE(json_extract(data, '$.stock'), 0), 0) * COALESCE(json_extract(data, '$.avgCost'), 0) + ? * ?)
+                    / (MAX(COALESCE(json_extract(data, '$.stock'), 0), 0) + ?), 2),
+                '$.stock', ROUND(COALESCE(json_extract(data, '$.stock'), 0) + ?, 4))
+            WHERE collection = 'ingredients' AND id = ? AND deleted = 0`)
+            .bind(now, round4(l.qty), l.unitPrice, round4(l.qty), round4(l.qty), ing.obj.id));
+    }
+    const purchase = {
+        id: body.id, supplier, date: body.date, lines: clean, total: clean.reduce((s, l) => s + l.total, 0),
+        note: typeof body.note === 'string' ? body.note.trim().slice(0, 200) : '',
+        staffId: user.id, staffName: user.name, at: new Date(now).toISOString()
+    };
+    stmts.unshift(db.prepare(`INSERT INTO records (collection, id, data, deleted, updated_at) VALUES ('purchases', ?, ?, 0, ?)`)
+        .bind(purchase.id, JSON.stringify(purchase), now));
+    stmts.push(auditStmt(db, user, 'achat', 'purchases', purchase.id, { fournisseur: supplier, total: purchase.total, lignes: clean.length }));
+    try {
+        await db.batch(stmts);
+    } catch (e) {
+        if (isUniqueError(e)) return fail(409, 'Achat deja enregistre');
+        throw e;
+    }
+    return json({ ok: true, records: [rec('purchases', purchase), ...await ingredientRecords(db, clean.map(l => l.ingredientId))] });
+}
+
+async function ingredientRecords(db, ids) {
+    const out = [];
+    for (const id of [...new Set(ids)]) {
+        const r = await getRecord(db, 'ingredients', id);
+        if (r) out.push({ collection: 'ingredients', id, data: r.raw, deleted: 0 });
+    }
+    return out;
+}
+
+async function createLoss(request, db, user) {
+    if (!can(user, 'gerant', 'cuisinier')) return fail(403, 'Non autorise');
+    const body = await readBody(request);
+    if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
+    const ing = await getRecord(db, 'ingredients', body.ingredientId);
+    if (!ing) return fail(404, 'Ingredient introuvable');
+    if (!isQty(body.qty)) return fail(400, 'Quantite invalide');
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    if (reason.length < 3 || reason.length > 150) return fail(400, 'Indiquez le motif de la perte');
+    const now = Date.now();
+    try {
+        await db.batch([
+            ...stockMoveStmts(db, { ingredientId: ing.obj.id, qty: -body.qty, kind: 'perte', unitCost: ing.obj.avgCost || 0, user, note: reason, clientId: body.id, now }),
+            auditStmt(db, user, 'perte', 'ingredients', ing.obj.id, { ingredient: ing.obj.name, quantite: body.qty, motif: reason })
+        ]);
+    } catch (e) {
+        if (!isUniqueError(e)) throw e;
+    }
+    return json({ ok: true, records: await ingredientRecords(db, [ing.obj.id]) });
+}
+
+async function createInventory(request, db, user) {
+    if (!can(user, 'gerant')) return fail(403, "Seul le gerant peut valider un inventaire");
+    const body = await readBody(request);
+    if (!body || !ID_RE.test(body.id || '')) return fail(400, 'Identifiant invalide');
+    const dup = await getRecord(db, 'inventories', body.id);
+    if (dup) return json({ duplicate: true, records: [rec('inventories', dup.obj)] });
+    const lines = Array.isArray(body.lines) ? body.lines : [];
+    if (!lines.length || lines.length > 500) return fail(400, 'Inventaire vide');
+    const now = Date.now();
+    const out = [];
+    const stmts = [];
+    for (const l of lines) {
+        const ing = l && await getRecord(db, 'ingredients', l.ingredientId);
+        if (!ing) return fail(400, 'Ingredient introuvable');
+        if (!(typeof l.counted === 'number' && l.counted >= 0 && l.counted <= 1000000)) return fail(400, `Quantite comptee invalide pour ${ing.obj.name}`);
+        const theoretical = round4(ing.obj.stock || 0);
+        const diff = round4(l.counted - theoretical);
+        const cost = ing.obj.avgCost || 0;
+        out.push({ ingredientId: ing.obj.id, name: ing.obj.name, unit: ing.obj.unit, theoretical, counted: round4(l.counted), diff, value: Math.round(diff * cost) });
+        if (diff !== 0) stmts.push(...stockMoveStmts(db, { ingredientId: ing.obj.id, qty: diff, kind: 'inventaire', ref: body.id, unitCost: cost, user, now }));
+    }
+    const inventory = {
+        id: body.id, at: new Date(now).toISOString(), staffId: user.id, staffName: user.name, lines: out,
+        totalValue: out.reduce((s, l) => s + l.value, 0),
+        note: typeof body.note === 'string' ? body.note.trim().slice(0, 200) : ''
+    };
+    stmts.unshift(db.prepare(`INSERT INTO records (collection, id, data, deleted, updated_at) VALUES ('inventories', ?, ?, 0, ?)`)
+        .bind(inventory.id, JSON.stringify(inventory), now));
+    stmts.push(auditStmt(db, user, 'inventaire', 'inventories', inventory.id,
+        { lignes: out.length, ecarts: out.filter(l => l.diff).length, valeur_ecart: inventory.totalValue }));
+    try {
+        await db.batch(stmts);
+    } catch (e) {
+        if (isUniqueError(e)) return fail(409, 'Inventaire deja enregistre');
+        throw e;
+    }
+    return json({ ok: true, records: [rec('inventories', inventory), ...await ingredientRecords(db, out.map(l => l.ingredientId))] });
+}
+
+async function listMoves(url, db) {
+    const id = url.searchParams.get('ingredientId') || '';
+    const limit = Math.min(300, Math.max(1, parseInt(url.searchParams.get('limit'), 10) || 100));
+    const { results } = await db.prepare(`SELECT at, qty, kind, ref, unit_cost, staff_name, note FROM stock_moves
+        WHERE ingredient_id = ? ORDER BY id DESC LIMIT ?`).bind(id, limit).all();
+    return json({ moves: results });
 }
 
 function summarize(collection, rec) {
@@ -816,6 +1031,13 @@ async function handleApi(request, env, url) {
         if (route === '/cash/close' && method === 'POST') return await closeCash(request, db, user);
         if (route === '/payments' && method === 'POST') return await createPayment(request, db, user);
         if (route === '/refunds' && method === 'POST') return await createRefund(request, db, user);
+        if (route === '/purchases' && method === 'POST') return await createPurchase(request, db, user);
+        if (route === '/stock/loss' && method === 'POST') return await createLoss(request, db, user);
+        if (route === '/inventories' && method === 'POST') return await createInventory(request, db, user);
+        if (route === '/stock/moves' && method === 'GET') {
+            if (!can(user, 'gerant', 'cuisinier')) return fail(403, 'Non autorise');
+            return await listMoves(url, db);
+        }
 
         if (route === '/staff' && method === 'GET') {
             const { results } = await db.prepare('SELECT id, username, name, role FROM staff ORDER BY id').all();

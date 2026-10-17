@@ -6,7 +6,10 @@ const App = {
         orders: [],
         payments: [],
         refunds: [],
-        cashSessions: []
+        cashSessions: [],
+        ingredients: [],
+        purchases: [],
+        inventories: []
     },
 
     staff: [],
@@ -141,7 +144,7 @@ const App = {
     },
 
     sync: {
-        COLLECTIONS: ['tables', 'categories', 'menuItems', 'orders', 'payments', 'refunds', 'cashSessions'],
+        COLLECTIONS: ['tables', 'categories', 'menuItems', 'orders', 'payments', 'refunds', 'cashSessions', 'ingredients', 'purchases', 'inventories'],
         // synced[key] holds a hash of the last server-confirmed JSON, so pending local edits are whatever differs from it.
         synced: {},
         since: 0,
@@ -203,14 +206,17 @@ const App = {
                 if (r.deleted) {
                     if (idx >= 0) { list.splice(idx, 1); changed = true; }
                     delete this.synced[key];
-                } else if (this.synced[key] !== this.h(r.data) || idx < 0) {
+                } else {
                     const item = JSON.parse(r.data);
+                    // Hash the re-serialised form: SQLite may write 2.0 where the browser writes 2.
+                    const hash = this.h(JSON.stringify(item));
+                    if (this.synced[key] === hash && idx >= 0) continue;
                     const old = idx >= 0 ? list[idx] : null;
                     if (!silent && r.collection === 'orders' && (!old || old.status !== item.status)) {
                         this.events.push({ order: item, from: old ? old.status : null, to: item.status });
                     }
                     if (idx >= 0) list[idx] = item; else list.push(item);
-                    this.synced[key] = this.h(r.data);
+                    this.synced[key] = hash;
                     changed = true;
                 }
             }
@@ -277,7 +283,7 @@ const App = {
             } else {
                 const item = JSON.parse(r.data);
                 if (idx >= 0) list[idx] = item; else list.push(item);
-                this.synced[key] = this.h(r.data);
+                this.synced[key] = this.h(JSON.stringify(item));
             }
         },
 
@@ -476,6 +482,7 @@ const App = {
             menu: 'Menu / Carte',
             caisse: 'Caisse',
             cuisine: 'Ecran Cuisine',
+            stocks: 'Stocks & approvisionnement',
             rapports: 'Rapports & Statistiques',
             personnel: 'Gestion du personnel'
         };
@@ -812,6 +819,7 @@ const App = {
         this.cuisine.render();
         this.rapports.render();
         this.personnel.render();
+        this.stocks.render();
         this.pos.render();
         this.updateBadge();
     },
@@ -826,6 +834,9 @@ const App = {
         'page.cuisine': ['gerant', 'caissier', 'serveur', 'cuisinier'],
         'page.rapports': ['gerant'],
         'page.personnel': ['gerant'],
+        'page.stocks': ['gerant', 'cuisinier'],
+        'stock.manage': ['gerant'],
+        'stock.loss': ['gerant', 'cuisinier'],
         'tables.manage': ['gerant'],
         'menu.manage': ['gerant'],
         'menu.availability': ['gerant', 'cuisinier'],
@@ -1065,6 +1076,16 @@ const App = {
                 title: `${stale.length} caisse(s) ouverte(s) depuis plus de ${this.CASH_OPEN_MAX_H} h`,
                 detail: stale.map(s => `${s.staffName}, ouverte le ${new Date(s.openedAt).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`).join(' — ')
             });
+
+            const lowStock = App.stocks.alerts();
+            if (lowStock.length && App.can('page.stocks')) {
+                const outCount = lowStock.filter(i => App.stocks.level(i) === 'rupture').length;
+                alerts.push({
+                    level: outCount ? 'critical' : 'warning', page: 'stocks',
+                    title: outCount ? `${outCount} ingredient(s) en rupture, ${lowStock.length - outCount} en stock bas` : `${lowStock.length} ingredient(s) en stock bas`,
+                    detail: lowStock.slice(0, 5).map(i => `${i.name} : ${App.stocks.qty(i.stock)} ${i.unit}`).join(' — ')
+                });
+            }
 
             const off = App.data.menuItems.filter(m => m.available === false);
             if (off.length) alerts.push({
@@ -2217,7 +2238,9 @@ const App = {
                 const optText = [
                     opts.sides && opts.sides.length ? `${opts.sides.length} accompagnement(s)` : '',
                     opts.extras && opts.extras.length ? `${opts.extras.length} supplement(s)` : '',
-                    opts.prefs && opts.prefs.length ? `${opts.prefs.length} preference(s)` : ''
+                    opts.prefs && opts.prefs.length ? `${opts.prefs.length} preference(s)` : '',
+                    m.recipe && m.recipe.length && App.can('menu.manage')
+                        ? `cout ${App.fmt(Math.round(this.recipeCostOf(m.recipe)))} · marge ${m.price ? Math.round((m.price - this.recipeCostOf(m.recipe)) / m.price * 100) : 0} %` : ''
                 ].filter(Boolean).join(' · ');
                 return `<div class="menu-item-card ${m.available ? '' : 'unavailable'}">
                     <div class="menu-item-thumb">${m.photo ? `<img src="${m.photo}" alt="" loading="lazy">` : App.esc(cat ? cat.icon : '🍽️')}</div>
@@ -2258,6 +2281,10 @@ const App = {
             document.querySelector('.options-editor').open = !!(o.sides || o.extras || o.prefs);
             document.getElementById('menuItemPhotoInput').value = '';
             this.setPhoto(m ? m.photo || null : null);
+            this.recipe = m && m.recipe ? m.recipe.map(r => ({ ingredientId: r.ingredientId, qty: String(r.qty) })) : [];
+            document.getElementById('recipeEditor').open = this.recipe.length > 0;
+            document.getElementById('recipeEditor').style.display = App.data.ingredients.length || this.recipe.length ? '' : 'none';
+            this.renderRecipe();
             this.populateCategorySelect(m ? m.category : undefined);
             document.getElementById('modalMenuItem').classList.add('open');
         },
@@ -2309,6 +2336,52 @@ const App = {
             img.src = url;
         },
 
+        recipeCostOf(recipe) {
+            return (recipe || []).reduce((s, r) => {
+                const i = App.data.ingredients.find(x => x.id === r.ingredientId);
+                return s + (i ? (parseFloat(r.qty) || 0) * (i.avgCost || 0) : 0);
+            }, 0);
+        },
+
+        renderRecipe() {
+            document.getElementById('recipeLines').innerHTML = this.recipe.length ? this.recipe.map((r, i) => {
+                const ing = App.data.ingredients.find(x => x.id === r.ingredientId);
+                return `<div class="recipe-line">
+                    <select onchange="App.menu.setRecipe(${i}, 'ingredientId', this.value)" aria-label="Ingredient">${App.stocks.options(r.ingredientId)}</select>
+                    <input type="number" min="0" step="any" value="${App.esc(r.qty)}" placeholder="Qte" aria-label="Quantite par portion" oninput="App.menu.setRecipe(${i}, 'qty', this.value)">
+                    <span class="recipe-unit">${ing ? App.esc(ing.unit) : ''}</span>
+                    <button type="button" class="pay-line-remove" onclick="App.menu.removeRecipeLine(${i})" aria-label="Retirer">&times;</button>
+                </div>`;
+            }).join('') : '<p class="form-hint">Aucun ingredient : les ventes de ce plat ne toucheront pas le stock.</p>';
+            this.updateRecipeCost();
+        },
+
+        updateRecipeCost() {
+            const cost = Math.round(this.recipeCostOf(this.recipe));
+            const price = parseInt(document.getElementById('menuItemPrice').value, 10) || 0;
+            const el = document.getElementById('recipeCost');
+            if (!this.recipe.length) { el.innerHTML = ''; return; }
+            const margin = price - cost;
+            el.innerHTML = `Cout de revient estime : <strong>${App.fmt(cost)}</strong>` +
+                (price ? ` · Marge : <strong class="${margin < 0 ? 'neg' : ''}">${App.fmt(margin)} (${Math.round(margin / price * 100)} %)</strong>` : '');
+        },
+
+        setRecipe(i, field, value) {
+            this.recipe[i][field] = value;
+            if (field === 'ingredientId') this.renderRecipe(); else this.updateRecipeCost();
+        },
+
+        addRecipeLine() {
+            if (!App.data.ingredients.length) { App.toast("Creez d'abord des ingredients dans Stocks", 'error'); return; }
+            this.recipe.push({ ingredientId: '', qty: '' });
+            this.renderRecipe();
+        },
+
+        removeRecipeLine(i) {
+            this.recipe.splice(i, 1);
+            this.renderRecipe();
+        },
+
         parseList(id) {
             return document.getElementById(id).value.split(',').map(s => s.trim()).filter(Boolean).slice(0, 12).map(s => s.slice(0, 40));
         },
@@ -2346,6 +2419,14 @@ const App = {
             if (extras.length) options.extras = extras;
             if (prefs.length) options.prefs = prefs;
 
+            const recipe = [];
+            for (const r of this.recipe || []) {
+                if (!r.ingredientId && !r.qty) continue;
+                const q = parseFloat(r.qty);
+                if (!r.ingredientId || !(q > 0)) { App.toast('Recette : chaque ligne doit avoir un ingredient et une quantite', 'error'); return; }
+                recipe.push({ ingredientId: r.ingredientId, qty: q });
+            }
+
             const fields = { name, category, price, desc, available };
             if (this.editingItemId) {
                 const m = App.data.menuItems.find(x => x.id === this.editingItemId);
@@ -2353,12 +2434,14 @@ const App = {
                     Object.assign(m, fields);
                     if (Object.keys(options).length) m.options = options; else delete m.options;
                     if (this.photo) m.photo = this.photo; else delete m.photo;
+                    if (recipe.length) m.recipe = recipe; else delete m.recipe;
                 }
                 App.toast('Plat modifie');
             } else {
                 const m = { id: App.genId(), ...fields };
                 if (Object.keys(options).length) m.options = options;
                 if (this.photo) m.photo = this.photo;
+                if (recipe.length) m.recipe = recipe;
                 App.data.menuItems.push(m);
                 App.toast('Plat ajoute');
             }
@@ -2962,6 +3045,413 @@ const App = {
                 ${s.note ? `<div class="tp-small">Commentaire : ${App.esc(s.note)}</div>` : ''}
                 <div class="tp-sep"></div>
                 <div class="tp-sign">Signature caissier :</div><div class="tp-sign">Signature gerant :</div>`);
+        }
+    },
+
+    // STOCKS
+    stocks: {
+        tab: 'etat',
+        editingId: null,
+        lossId: null,
+        pending: null,
+        purLines: [],
+        busy: false,
+        KIND_LABELS: { achat: 'Achat', vente: 'Vente', annulation: 'Annulation', perte: 'Perte', inventaire: 'Inventaire' },
+
+        qty(n) {
+            const v = Math.round((n || 0) * 1000) / 1000;
+            return v.toLocaleString('fr-FR', { maximumFractionDigits: 3 });
+        },
+
+        level(i) {
+            const s = i.stock || 0;
+            if (s <= 0) return 'rupture';
+            if (i.threshold > 0 && s <= i.threshold) return 'bas';
+            return 'ok';
+        },
+
+        // A brand-new ingredient that was never bought is not an alert yet; anything with a threshold or a purchase history is.
+        alerts() {
+            return App.data.ingredients.filter(i => this.level(i) !== 'ok' && (i.threshold > 0 || (i.stock || 0) < 0 || i.avgCost > 0));
+        },
+
+        setTab(tab) {
+            this.tab = tab;
+            document.querySelectorAll('.stock-tab').forEach(b => {
+                const on = b.dataset.tab === tab;
+                b.classList.toggle('active', on);
+                b.setAttribute('aria-selected', on);
+            });
+            document.querySelectorAll('.stock-pane').forEach(p => { p.hidden = p.dataset.pane !== tab; });
+        },
+
+        render() {
+            if (!document.getElementById('stockSummary')) return;
+            const ings = App.data.ingredients;
+            const value = ings.reduce((s, i) => s + Math.max(0, i.stock || 0) * (i.avgCost || 0), 0);
+            const low = ings.filter(i => this.level(i) === 'bas').length;
+            const out = ings.filter(i => this.level(i) === 'rupture').length;
+            const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+            const spent = App.data.purchases.filter(p => new Date(p.date) >= monthStart).reduce((s, p) => s + p.total, 0);
+            document.getElementById('stockSummary').innerHTML = `
+                <div class="kpi"><span class="kpi-label">Valeur du stock</span><span class="kpi-value">${App.fmt(Math.round(value))}</span><span class="kpi-sub">${ings.length} ingredient(s)</span></div>
+                <div class="kpi"><span class="kpi-label">Stock bas</span><span class="kpi-value">${low}</span><span class="kpi-sub">Sous le seuil d'alerte</span></div>
+                <div class="kpi"><span class="kpi-label">En rupture</span><span class="kpi-value">${out}</span><span class="kpi-sub">Stock nul ou negatif</span></div>
+                <div class="kpi"><span class="kpi-label">Achats du mois</span><span class="kpi-value">${App.fmt(spent)}</span><span class="kpi-sub">Depenses fournisseurs</span></div>`;
+            this.renderList();
+            this.renderPurchases();
+            this.renderInventories();
+        },
+
+        renderList() {
+            const q = (document.getElementById('stockSearch').value || '').trim().toLowerCase();
+            const order = { rupture: 0, bas: 1, ok: 2 };
+            const ings = App.data.ingredients.filter(i => !q || i.name.toLowerCase().includes(q))
+                .sort((a, b) => order[this.level(a)] - order[this.level(b)] || a.name.localeCompare(b.name));
+            const body = document.getElementById('stockBody');
+            if (!ings.length) {
+                body.innerHTML = `<tr><td colspan="7" class="empty-cell">${App.data.ingredients.length ? 'Aucun ingredient ne correspond' : 'Aucun ingredient. Commencez par en ajouter un, puis enregistrez un achat.'}</td></tr>`;
+                return;
+            }
+            const labels = { ok: 'OK', bas: 'Stock bas', rupture: 'Rupture' };
+            body.innerHTML = ings.map(i => {
+                const lv = this.level(i);
+                return `<tr>
+                    <td><strong>${App.esc(i.name)}</strong></td>
+                    <td class="num">${this.qty(i.stock)} ${App.esc(i.unit)}</td>
+                    <td class="num">${i.threshold ? this.qty(i.threshold) + ' ' + App.esc(i.unit) : '—'}</td>
+                    <td><span class="stock-badge ${lv}">${labels[lv]}</span></td>
+                    <td class="num">${i.avgCost ? App.fmt(Math.round(i.avgCost)) + ' / ' + App.esc(i.unit) : '—'}</td>
+                    <td class="num">${App.fmt(Math.round(Math.max(0, i.stock || 0) * (i.avgCost || 0)))}</td>
+                    <td class="op-actions">
+                        <button class="btn btn-small btn-secondary" onclick="App.stocks.openMoves('${i.id}')">Historique</button>
+                        ${App.can('stock.loss') ? `<button class="btn btn-small btn-secondary" onclick="App.stocks.openLoss('${i.id}')">Perte</button>` : ''}
+                        ${App.can('stock.manage') ? `<button class="btn btn-small btn-secondary" onclick="App.stocks.openIngredient('${i.id}')">Modifier</button>` : ''}
+                    </td>
+                </tr>`;
+            }).join('');
+        },
+
+        renderPurchases() {
+            const body = document.getElementById('purchasesBody');
+            const list = [...App.data.purchases].sort((a, b) => (b.date + b.at).localeCompare(a.date + a.at)).slice(0, 100);
+            body.innerHTML = list.length ? list.map(p => `<tr>
+                    <td>${App.esc(new Date(p.date + 'T12:00:00').toLocaleDateString('fr-FR'))}</td>
+                    <td>${App.esc(p.supplier)}${p.note ? `<div class="diff-note">${App.esc(p.note)}</div>` : ''}</td>
+                    <td>${App.esc(p.lines.map(l => `${this.qty(l.qty)} ${l.unit} ${l.name}`).join(', '))}</td>
+                    <td class="num"><strong>${App.fmt(p.total)}</strong></td>
+                    <td>${App.esc(p.staffName || '')}</td>
+                </tr>`).join('')
+                : '<tr><td colspan="5" class="empty-cell">Aucun achat enregistre</td></tr>';
+        },
+
+        renderInventories() {
+            const body = document.getElementById('inventoriesBody');
+            const list = [...App.data.inventories].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 50);
+            body.innerHTML = list.length ? list.map(inv => `<tr>
+                    <td>${App.esc(new Date(inv.at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</td>
+                    <td>${App.esc(inv.staffName || '')}</td>
+                    <td class="num">${inv.lines.length}</td>
+                    <td class="num">${inv.lines.filter(l => l.diff).length}</td>
+                    <td class="num ${inv.totalValue < 0 ? 'diff-bad' : inv.totalValue > 0 ? '' : 'diff-ok'}">${inv.totalValue > 0 ? '+' : ''}${App.fmt(inv.totalValue)}</td>
+                    <td><button class="btn btn-small btn-secondary" onclick="App.stocks.showInventory('${inv.id}')">Detail</button></td>
+                </tr>`).join('')
+                : '<tr><td colspan="6" class="empty-cell">Aucun inventaire realise</td></tr>';
+        },
+
+        closeModal(id) {
+            document.getElementById(id).classList.remove('open');
+        },
+
+        // ---- ingredients ----
+
+        openIngredient(id) {
+            const i = id ? App.data.ingredients.find(x => x.id === id) : null;
+            this.editingId = i ? i.id : null;
+            document.getElementById('ingredientTitle').textContent = i ? `Modifier « ${i.name} »` : 'Nouvel ingredient';
+            document.getElementById('ingName').value = i ? i.name : '';
+            document.getElementById('ingUnit').value = i ? i.unit : 'kg';
+            document.getElementById('ingThreshold').value = i ? i.threshold : '';
+            document.getElementById('ingDelete').style.display = i ? '' : 'none';
+            document.getElementById('modalIngredient').classList.add('open');
+            document.getElementById('ingName').focus();
+        },
+
+        saveIngredient() {
+            const name = document.getElementById('ingName').value.trim();
+            const unit = document.getElementById('ingUnit').value.trim();
+            const threshold = parseFloat(document.getElementById('ingThreshold').value) || 0;
+            if (!name || !unit) { App.toast("Indiquez le nom et l'unite", 'error'); return; }
+            if (App.data.ingredients.some(i => i.id !== this.editingId && i.name.toLowerCase() === name.toLowerCase())) {
+                App.toast('Cet ingredient existe deja', 'error');
+                return;
+            }
+            if (this.editingId) {
+                const i = App.data.ingredients.find(x => x.id === this.editingId);
+                Object.assign(i, { name, unit, threshold });
+            } else {
+                App.data.ingredients.push({ id: App.genId(), name, unit, threshold, stock: 0, avgCost: 0 });
+            }
+            App.saveData();
+            this.closeModal('modalIngredient');
+            App.render();
+            App.toast('Ingredient enregistre');
+        },
+
+        deleteIngredient() {
+            const i = App.data.ingredients.find(x => x.id === this.editingId);
+            if (!i) return;
+            const used = App.data.menuItems.find(m => (m.recipe || []).some(r => r.ingredientId === i.id));
+            if (used) { App.toast(`Utilise dans la recette « ${used.name} » : retirez-le d'abord`, 'error'); return; }
+            if (!confirm(`Supprimer « ${i.name} » ?`)) return;
+            App.data.ingredients = App.data.ingredients.filter(x => x.id !== i.id);
+            App.saveData();
+            this.closeModal('modalIngredient');
+            App.render();
+        },
+
+        options(selected) {
+            return '<option value="">Choisir...</option>' + [...App.data.ingredients].sort((a, b) => a.name.localeCompare(b.name))
+                .map(i => `<option value="${i.id}" ${i.id === selected ? 'selected' : ''}>${App.esc(i.name)} (${App.esc(i.unit)})</option>`).join('');
+        },
+
+        // ---- achats ----
+
+        openPurchase() {
+            if (!App.data.ingredients.length) { App.toast("Ajoutez d'abord vos ingredients", 'error'); return; }
+            this.pending = App.genId();
+            this.purLines = [{ ingredientId: '', qty: '', unitPrice: '' }];
+            document.getElementById('purSupplier').value = '';
+            document.getElementById('purNote').value = '';
+            const d = new Date();
+            document.getElementById('purDate').value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            document.getElementById('purSuppliers').innerHTML = [...new Set(App.data.purchases.map(p => p.supplier))].map(s => `<option value="${App.esc(s)}">`).join('');
+            this.renderPurchaseLines();
+            document.getElementById('modalPurchase').classList.add('open');
+        },
+
+        renderPurchaseLines() {
+            document.getElementById('purLines').innerHTML = `<div class="pur-head"><span>Ingredient</span><span>Quantite</span><span>Prix unitaire</span><span>Total</span><span></span></div>` +
+                this.purLines.map((l, i) => {
+                    const ing = App.data.ingredients.find(x => x.id === l.ingredientId);
+                    return `<div class="pur-line">
+                        <select onchange="App.stocks.setPurLine(${i}, 'ingredientId', this.value)" aria-label="Ingredient">${this.options(l.ingredientId)}</select>
+                        <input type="number" min="0" step="any" value="${App.esc(l.qty)}" placeholder="${ing ? App.esc(ing.unit) : 'Qte'}" aria-label="Quantite" oninput="App.stocks.setPurLine(${i}, 'qty', this.value)">
+                        <input type="number" min="0" step="25" value="${App.esc(l.unitPrice)}" placeholder="FCFA / ${ing ? App.esc(ing.unit) : 'unite'}" aria-label="Prix unitaire" oninput="App.stocks.setPurLine(${i}, 'unitPrice', this.value)">
+                        <span class="pur-line-total" data-i="${i}">${App.fmt(Math.round((parseFloat(l.qty) || 0) * (parseInt(l.unitPrice, 10) || 0)))}</span>
+                        <button class="pay-line-remove" onclick="App.stocks.removePurLine(${i})" aria-label="Retirer la ligne">&times;</button>
+                    </div>`;
+                }).join('');
+            this.updatePurTotal();
+        },
+
+        setPurLine(i, field, value) {
+            this.purLines[i][field] = value;
+            if (field === 'ingredientId') { this.renderPurchaseLines(); return; }
+            const l = this.purLines[i];
+            const cell = document.querySelector(`.pur-line-total[data-i="${i}"]`);
+            if (cell) cell.textContent = App.fmt(Math.round((parseFloat(l.qty) || 0) * (parseInt(l.unitPrice, 10) || 0)));
+            this.updatePurTotal();
+        },
+
+        addPurchaseLine() {
+            this.purLines.push({ ingredientId: '', qty: '', unitPrice: '' });
+            this.renderPurchaseLines();
+        },
+
+        removePurLine(i) {
+            this.purLines.splice(i, 1);
+            if (!this.purLines.length) this.purLines.push({ ingredientId: '', qty: '', unitPrice: '' });
+            this.renderPurchaseLines();
+        },
+
+        updatePurTotal() {
+            const total = this.purLines.reduce((s, l) => s + Math.round((parseFloat(l.qty) || 0) * (parseInt(l.unitPrice, 10) || 0)), 0);
+            document.getElementById('purTotal').textContent = App.fmt(total);
+        },
+
+        async savePurchase() {
+            if (this.busy) return;
+            const supplier = document.getElementById('purSupplier').value.trim();
+            const date = document.getElementById('purDate').value;
+            const lines = this.purLines.filter(l => l.ingredientId || l.qty || l.unitPrice);
+            if (!supplier) { App.toast('Indiquez le fournisseur', 'error'); return; }
+            if (!lines.length) { App.toast('Ajoutez au moins une ligne', 'error'); return; }
+            for (const l of lines) {
+                if (!l.ingredientId || !(parseFloat(l.qty) > 0) || l.unitPrice === '' || !(parseInt(l.unitPrice, 10) >= 0)) {
+                    App.toast('Chaque ligne doit avoir un ingredient, une quantite et un prix', 'error');
+                    return;
+                }
+            }
+            this.busy = true;
+            document.getElementById('purSave').disabled = true;
+            try {
+                await App.serverAction('/purchases', {
+                    id: this.pending, supplier, date, note: document.getElementById('purNote').value.trim(),
+                    lines: lines.map(l => ({ ingredientId: l.ingredientId, qty: parseFloat(l.qty), unitPrice: parseInt(l.unitPrice, 10) }))
+                });
+                this.closeModal('modalPurchase');
+                App.toast('Achat enregistre : stocks mis a jour');
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible : achat NON enregistre', 'error');
+            } finally {
+                this.busy = false;
+                document.getElementById('purSave').disabled = false;
+            }
+        },
+
+        // ---- pertes ----
+
+        openLoss(id) {
+            const i = App.data.ingredients.find(x => x.id === id);
+            if (!i) return;
+            this.lossId = id;
+            this.pending = App.genId();
+            document.getElementById('lossTitle').textContent = `Perte : ${i.name}`;
+            document.getElementById('lossQtyLabel').textContent = `Quantite perdue (${i.unit})`;
+            document.getElementById('lossQty').value = '';
+            document.getElementById('lossReason').value = '';
+            document.getElementById('modalLoss').classList.add('open');
+            document.getElementById('lossQty').focus();
+        },
+
+        async saveLoss() {
+            if (this.busy) return;
+            const qty = parseFloat(document.getElementById('lossQty').value);
+            const reason = document.getElementById('lossReason').value.trim();
+            if (!(qty > 0)) { App.toast('Indiquez la quantite perdue', 'error'); return; }
+            if (reason.length < 3) { App.toast('Indiquez le motif', 'error'); return; }
+            this.busy = true;
+            document.getElementById('lossSave').disabled = true;
+            try {
+                await App.serverAction('/stock/loss', { id: this.pending, ingredientId: this.lossId, qty, reason });
+                this.closeModal('modalLoss');
+                App.toast('Perte enregistree');
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible : perte NON enregistree', 'error');
+            } finally {
+                this.busy = false;
+                document.getElementById('lossSave').disabled = false;
+            }
+        },
+
+        // ---- inventaire ----
+
+        openInventory() {
+            if (!App.data.ingredients.length) { App.toast("Ajoutez d'abord vos ingredients", 'error'); return; }
+            this.pending = App.genId();
+            const ings = [...App.data.ingredients].sort((a, b) => a.name.localeCompare(b.name));
+            document.getElementById('invTitle').textContent = 'Nouvel inventaire';
+            document.getElementById('invFooter').style.display = '';
+            document.getElementById('invBody').innerHTML = `<p class="form-hint">Comptez ce qui est reellement en reserve et saisissez les quantites. Laissez vide les ingredients non comptes.</p>
+                <table class="data-table inv-table">
+                    <thead><tr><th>Ingredient</th><th>Theorique</th><th>Compte</th><th>Ecart</th><th>Valeur</th></tr></thead>
+                    <tbody>${ings.map(i => `<tr data-id="${i.id}">
+                        <td>${App.esc(i.name)}</td>
+                        <td class="num">${this.qty(i.stock)} ${App.esc(i.unit)}</td>
+                        <td><input type="number" min="0" step="any" class="inv-input" aria-label="Quantite comptee ${App.esc(i.name)}" oninput="App.stocks.updateInventory()"></td>
+                        <td class="num inv-diff">—</td>
+                        <td class="num inv-value">—</td>
+                    </tr>`).join('')}</tbody>
+                </table>`;
+            this.updateInventory();
+            document.getElementById('modalInventory').classList.add('open');
+        },
+
+        inventoryLines() {
+            return [...document.querySelectorAll('#invBody tr[data-id]')].map(tr => {
+                const v = tr.querySelector('.inv-input').value;
+                return v === '' ? null : { tr, ingredientId: tr.dataset.id, counted: parseFloat(v) };
+            }).filter(Boolean);
+        },
+
+        updateInventory() {
+            let total = 0, counted = 0;
+            document.querySelectorAll('#invBody tr[data-id]').forEach(tr => {
+                const i = App.data.ingredients.find(x => x.id === tr.dataset.id);
+                const v = tr.querySelector('.inv-input').value;
+                const diffCell = tr.querySelector('.inv-diff'), valCell = tr.querySelector('.inv-value');
+                if (v === '' || !i) { diffCell.textContent = '—'; valCell.textContent = '—'; diffCell.className = 'num inv-diff'; return; }
+                const diff = parseFloat(v) - (i.stock || 0);
+                const value = Math.round(diff * (i.avgCost || 0));
+                counted++;
+                total += value;
+                diffCell.textContent = `${diff > 0 ? '+' : ''}${this.qty(diff)} ${i.unit}`;
+                diffCell.className = 'num inv-diff ' + (Math.abs(diff) < 1e-9 ? 'diff-ok' : 'diff-bad');
+                valCell.textContent = `${value > 0 ? '+' : ''}${App.fmt(value)}`;
+            });
+            document.getElementById('invTotal').textContent = counted ? `${counted} compte(s) · ecart ${total > 0 ? '+' : ''}${App.fmt(total)}` : '';
+        },
+
+        async saveInventory() {
+            if (this.busy) return;
+            const lines = this.inventoryLines();
+            if (!lines.length) { App.toast('Saisissez au moins une quantite comptee', 'error'); return; }
+            if (lines.some(l => !(l.counted >= 0))) { App.toast('Quantite invalide', 'error'); return; }
+            if (!confirm(`Valider l'inventaire de ${lines.length} ingredient(s) ? Les stocks seront remplaces par les quantites comptees.`)) return;
+            this.busy = true;
+            document.getElementById('invSave').disabled = true;
+            try {
+                const res = await App.serverAction('/inventories', { id: this.pending, lines: lines.map(l => ({ ingredientId: l.ingredientId, counted: l.counted })) });
+                this.closeModal('modalInventory');
+                const inv = res.records && res.records[0] && JSON.parse(res.records[0].data);
+                App.toast(inv ? `Inventaire valide · ecart ${inv.totalValue > 0 ? '+' : ''}${App.fmt(inv.totalValue)}` : 'Inventaire valide');
+                this.setTab('inventaires');
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible : inventaire NON enregistre', 'error');
+            } finally {
+                this.busy = false;
+                document.getElementById('invSave').disabled = false;
+            }
+        },
+
+        showInventory(id) {
+            const inv = App.data.inventories.find(x => x.id === id);
+            if (!inv) return;
+            document.getElementById('invTitle').textContent = `Inventaire du ${new Date(inv.at).toLocaleString('fr-FR')}`;
+            document.getElementById('invFooter').style.display = 'none';
+            document.getElementById('invBody').innerHTML = `<p class="form-hint">Realise par ${App.esc(inv.staffName || '')}${inv.note ? ' · ' + App.esc(inv.note) : ''}</p>
+                <table class="data-table inv-table">
+                    <thead><tr><th>Ingredient</th><th>Theorique</th><th>Compte</th><th>Ecart</th><th>Valeur</th></tr></thead>
+                    <tbody>${inv.lines.map(l => `<tr>
+                        <td>${App.esc(l.name)}</td>
+                        <td class="num">${this.qty(l.theoretical)} ${App.esc(l.unit)}</td>
+                        <td class="num">${this.qty(l.counted)} ${App.esc(l.unit)}</td>
+                        <td class="num ${l.diff ? 'diff-bad' : 'diff-ok'}">${l.diff > 0 ? '+' : ''}${this.qty(l.diff)}</td>
+                        <td class="num">${l.value > 0 ? '+' : ''}${App.fmt(l.value)}</td>
+                    </tr>`).join('')}</tbody>
+                    <tfoot><tr><td colspan="4"><strong>Total des ecarts</strong></td><td class="num"><strong>${inv.totalValue > 0 ? '+' : ''}${App.fmt(inv.totalValue)}</strong></td></tr></tfoot>
+                </table>`;
+            document.getElementById('modalInventory').classList.add('open');
+        },
+
+        // ---- historique ----
+
+        async openMoves(id) {
+            const i = App.data.ingredients.find(x => x.id === id);
+            if (!i) return;
+            document.getElementById('movesTitle').textContent = `Historique : ${i.name}`;
+            const body = document.getElementById('movesBody');
+            body.innerHTML = '<p class="empty-state">Chargement...</p>';
+            document.getElementById('modalMoves').classList.add('open');
+            try {
+                const { moves } = await App.api('/stock/moves?ingredientId=' + encodeURIComponent(id) + '&limit=150');
+                const refLabel = m => {
+                    const o = App.data.orders.find(x => x.id === m.ref);
+                    if (o) return 'Commande #' + String(o.number).padStart(3, '0');
+                    return m.note || '';
+                };
+                body.innerHTML = moves.length ? `<table class="data-table"><thead><tr><th>Date</th><th>Type</th><th>Quantite</th><th>Detail</th><th>Par</th></tr></thead><tbody>
+                    ${moves.map(m => `<tr>
+                        <td>${App.esc(new Date(m.at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</td>
+                        <td>${this.KIND_LABELS[m.kind] || App.esc(m.kind)}</td>
+                        <td class="num ${m.qty < 0 ? 'neg' : ''}">${m.qty > 0 ? '+' : ''}${this.qty(m.qty)} ${App.esc(i.unit)}</td>
+                        <td>${App.esc(refLabel(m))}${m.kind === 'achat' && m.unit_cost != null ? ` · ${App.fmt(m.unit_cost)}/${App.esc(i.unit)}` : ''}</td>
+                        <td>${App.esc(m.staff_name || '')}</td>
+                    </tr>`).join('')}</tbody></table>` : '<p class="empty-state">Aucun mouvement</p>';
+            } catch (e) {
+                body.innerHTML = '<p class="empty-state">Historique indisponible hors connexion</p>';
+            }
         }
     },
 

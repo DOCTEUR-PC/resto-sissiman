@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=20261017g">
+    <link rel="stylesheet" href="styles.css?v=20261017h">
 </head>
 <body>
     <!-- LOGIN -->
@@ -66,6 +66,10 @@
             <a href="#" class="nav-item" data-page="cuisine" data-perm="page.cuisine">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 8l4 4-4 4"/><path d="M3 12h18"/><path d="M7 8L3 12l4 4"/></svg>
                 Cuisine
+            </a>
+            <a href="#" class="nav-item" data-page="stocks" data-perm="page.stocks">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>
+                Stocks
             </a>
             <div class="nav-separator"></div>
             <a href="#" class="nav-item" data-page="rapports" data-perm="page.rapports">
@@ -286,7 +290,7 @@
                         </div>
                         <div class="form-group">
                             <label>Prix (FCFA)</label>
-                            <input type="number" id="menuItemPrice" min="0" step="50" placeholder="Ex: 3500">
+                            <input type="number" id="menuItemPrice" min="0" step="50" placeholder="Ex: 3500" oninput="App.menu.updateRecipeCost()">
                         </div>
                         <div class="form-group">
                             <label>Description</label>
@@ -319,6 +323,12 @@
                                 <label>Preferences de preparation (separees par des virgules)</label>
                                 <input type="text" id="menuItemPrefs" placeholder="Ex: Bien cuit, Pimente, Sans oignon">
                             </div>
+                        </details>
+                        <details class="options-editor" id="recipeEditor">
+                            <summary>Recette et cout de revient (ingredients par portion)</summary>
+                            <div class="recipe-lines" id="recipeLines"></div>
+                            <button type="button" class="btn btn-small btn-secondary" onclick="App.menu.addRecipeLine()">+ Ingredient</button>
+                            <div class="recipe-cost" id="recipeCost"></div>
                         </details>
                         <div class="form-group">
                             <label class="checkbox-label">
@@ -524,6 +534,141 @@
             <div class="kitchen-board" id="cuisineBoard"></div>
         </section>
 
+        <!-- STOCKS -->
+        <section class="page" id="page-stocks">
+            <div class="stock-summary" id="stockSummary"></div>
+            <div class="stock-tabs" role="tablist">
+                <button class="stock-tab active" role="tab" data-tab="etat" onclick="App.stocks.setTab('etat')">Etat du stock</button>
+                <button class="stock-tab" role="tab" data-tab="achats" onclick="App.stocks.setTab('achats')">Achats</button>
+                <button class="stock-tab" role="tab" data-tab="inventaires" onclick="App.stocks.setTab('inventaires')">Inventaires</button>
+            </div>
+
+            <div class="stock-pane" data-pane="etat">
+                <div class="page-actions">
+                    <input type="search" class="stock-search" id="stockSearch" placeholder="Rechercher un ingredient..." oninput="App.stocks.renderList()" aria-label="Rechercher un ingredient">
+                    <button class="btn btn-primary" data-perm="stock.manage" onclick="App.stocks.openIngredient()">+ Ingredient</button>
+                </div>
+                <div class="panel"><div class="panel-body table-scroll stock-table-wrap">
+                    <table class="data-table">
+                        <thead><tr><th>Ingredient</th><th>Stock</th><th>Seuil</th><th>Etat</th><th>Cout moyen</th><th>Valeur</th><th></th></tr></thead>
+                        <tbody id="stockBody"></tbody>
+                    </table>
+                </div></div>
+            </div>
+
+            <div class="stock-pane" data-pane="achats" hidden>
+                <div class="page-actions">
+                    <button class="btn btn-primary" data-perm="stock.manage" onclick="App.stocks.openPurchase()">+ Nouvel achat</button>
+                </div>
+                <div class="panel"><div class="panel-body table-scroll stock-table-wrap">
+                    <table class="data-table">
+                        <thead><tr><th>Date</th><th>Fournisseur</th><th>Articles</th><th>Total</th><th>Saisi par</th></tr></thead>
+                        <tbody id="purchasesBody"></tbody>
+                    </table>
+                </div></div>
+            </div>
+
+            <div class="stock-pane" data-pane="inventaires" hidden>
+                <div class="page-actions">
+                    <button class="btn btn-primary" data-perm="stock.manage" onclick="App.stocks.openInventory()">Nouvel inventaire</button>
+                </div>
+                <div class="panel"><div class="panel-body table-scroll stock-table-wrap">
+                    <table class="data-table">
+                        <thead><tr><th>Date</th><th>Par</th><th>Ingredients comptes</th><th>Ecarts</th><th>Valeur des ecarts</th><th></th></tr></thead>
+                        <tbody id="inventoriesBody"></tbody>
+                    </table>
+                </div></div>
+            </div>
+
+            <div class="modal" id="modalIngredient">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3 id="ingredientTitle">Nouvel ingredient</h3>
+                        <button class="modal-close" onclick="App.stocks.closeModal('modalIngredient')">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-group"><label>Nom</label><input type="text" id="ingName" maxlength="60" placeholder="Ex: Poulet, Riz, Huile"></div>
+                        <div class="form-group"><label>Unite</label>
+                            <input type="text" id="ingUnit" list="ingUnits" maxlength="15" placeholder="Ex: kg">
+                            <datalist id="ingUnits"><option value="kg"><option value="g"><option value="L"><option value="cl"><option value="piece"><option value="bouteille"><option value="sachet"><option value="boite"></datalist>
+                        </div>
+                        <div class="form-group"><label>Seuil d'alerte (stock bas)</label><input type="number" id="ingThreshold" min="0" step="any" placeholder="Ex: 5"></div>
+                        <p class="form-hint">Le stock de depart se saisit par un achat ou un inventaire.</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-danger" id="ingDelete" onclick="App.stocks.deleteIngredient()">Supprimer</button>
+                        <button class="btn btn-secondary" onclick="App.stocks.closeModal('modalIngredient')">Annuler</button>
+                        <button class="btn btn-primary" onclick="App.stocks.saveIngredient()">Enregistrer</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal modal-large" id="modalPurchase">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>Nouvel achat</h3>
+                        <button class="modal-close" onclick="App.stocks.closeModal('modalPurchase')">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-row-2">
+                            <div class="form-group"><label>Fournisseur</label><input type="text" id="purSupplier" list="purSuppliers" maxlength="80" placeholder="Ex: Marche de Bobo"><datalist id="purSuppliers"></datalist></div>
+                            <div class="form-group"><label>Date</label><input type="date" id="purDate"></div>
+                        </div>
+                        <div class="pur-lines" id="purLines"></div>
+                        <button class="btn btn-small btn-secondary" onclick="App.stocks.addPurchaseLine()">+ Ajouter une ligne</button>
+                        <div class="pur-total">Total : <strong id="purTotal">0 FCFA</strong></div>
+                        <div class="form-group"><label>Note (facultatif)</label><input type="text" id="purNote" maxlength="200" placeholder="Ex: facture 123"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" onclick="App.stocks.closeModal('modalPurchase')">Annuler</button>
+                        <button class="btn btn-primary" id="purSave" onclick="App.stocks.savePurchase()">Enregistrer l'achat</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal" id="modalLoss">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3 id="lossTitle">Declarer une perte</h3>
+                        <button class="modal-close" onclick="App.stocks.closeModal('modalLoss')">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-group"><label id="lossQtyLabel">Quantite perdue</label><input type="number" id="lossQty" min="0" step="any"></div>
+                        <div class="form-group"><label>Motif</label><input type="text" id="lossReason" maxlength="150" placeholder="Ex: perime, renverse, abime"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" onclick="App.stocks.closeModal('modalLoss')">Annuler</button>
+                        <button class="btn btn-danger" id="lossSave" onclick="App.stocks.saveLoss()">Enregistrer la perte</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal modal-large" id="modalInventory">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3 id="invTitle">Inventaire</h3>
+                        <button class="modal-close" onclick="App.stocks.closeModal('modalInventory')">&times;</button>
+                    </div>
+                    <div class="modal-body" id="invBody"></div>
+                    <div class="modal-footer" id="invFooter">
+                        <span class="inv-total" id="invTotal"></span>
+                        <button class="btn btn-secondary" onclick="App.stocks.closeModal('modalInventory')">Annuler</button>
+                        <button class="btn btn-primary" id="invSave" onclick="App.stocks.saveInventory()">Valider l'inventaire</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal modal-large" id="modalMoves">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3 id="movesTitle">Historique</h3>
+                        <button class="modal-close" onclick="App.stocks.closeModal('modalMoves')">&times;</button>
+                    </div>
+                    <div class="modal-body table-scroll" id="movesBody"></div>
+                </div>
+            </div>
+        </section>
+
         <!-- RAPPORTS -->
         <section class="page" id="page-rapports">
             <div class="rapports-period">
@@ -692,6 +837,6 @@
 
     <div id="printArea" aria-hidden="true"></div>
 
-    <script src="app.js?v=20261017g"></script>
+    <script src="app.js?v=20261017h"></script>
 </body>
 </html>
