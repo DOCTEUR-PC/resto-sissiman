@@ -5382,6 +5382,22 @@ const App = {
             }).join('');
         },
 
+        // What a role allows by default, in plain words: the rights follow the role automatically.
+        ROLE_HINTS: {
+            proprietaire: 'Tous les droits du restaurant : personnel, caisse, stocks, rapports, menu.',
+            gerant: 'Gere tout le restaurant au quotidien, y compris le personnel (sauf les proprietaires).',
+            caissier: 'Prend les commandes, encaisse, ouvre et cloture sa caisse.',
+            serveur: 'Plan de salle, prise de commande et service aux tables.',
+            cuisinier: 'Ecran cuisine, plats prets, disponibilite des plats et pertes de stock.',
+            stock: 'Ingredients, achats fournisseurs, pertes et inventaires.',
+            comptable: 'Tableau de bord, caisses, rapports et journal (consultation).'
+        },
+
+        roleHint() {
+            const text = this.ROLE_HINTS[document.getElementById('staffRole').value];
+            document.getElementById('staffRoleHint').textContent = text ? text + ' Les droits sont donnes automatiquement selon le role.' : '';
+        },
+
         openModal(scope = null) {
             this.scope = scope;
             this.editingId = null;
@@ -5393,6 +5409,7 @@ const App = {
             document.getElementById('staffPassword').placeholder = 'Mot de passe provisoire (8 caracteres min.)';
             this.prepareRoleSelect(null);
             document.getElementById('staffRole').value = 'serveur';
+            this.roleHint();
             document.getElementById('modalPersonnel').classList.add('open');
         },
 
@@ -5418,6 +5435,7 @@ const App = {
             document.getElementById('staffPassword').placeholder = 'Laisser vide pour ne pas changer';
             this.prepareRoleSelect(s);
             document.getElementById('staffRole').value = s.role;
+            this.roleHint();
             document.getElementById('modalPersonnel').classList.add('open');
         },
 

@@ -3237,3 +3237,5 @@ pre.welcome-text { white-space: pre-wrap; user-select: all; }
 .plat-staff-tools select { padding: 0.55rem 0.8rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; font-size: 0.88rem; max-width: 100%; }
 #platRolesPanel { margin-top: 1.25rem; }
 #platRolesPanel[hidden] { display: none; }
+.role-hint { margin-top: 0.4rem; font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; }
+.role-hint { margin-top: 0.4rem; font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; }
