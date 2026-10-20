@@ -719,24 +719,32 @@ const App = {
         data: null,
         draft: null,
         ORDER: ['gerant', 'caissier', 'serveur', 'cuisinier', 'stock', 'comptable', 'proprietaire'],
+        // The designer space reuses this object with its own elements and endpoint (see App.platRoles).
+        url: '/roles',
+        self: 'App.roles',
+        ids: { matrix: 'rolesMatrix', save: 'rolesSave', reset: 'rolesReset', hint: 'rolesHint' },
+        el(k) { return document.getElementById(this.ids[k]); },
 
         async load() {
-            if (!App.can('roles.manage')) return;
+            if (!this.url || !App.can('roles.manage')) return;
+            const url = this.url;
             try {
-                this.data = await App.api('/roles');
+                const data = await App.api(url);
+                if (url !== this.url) return;
+                this.data = data;
                 this.draft = JSON.parse(JSON.stringify(this.data.roles));
                 this.render();
             } catch (e) {
-                document.getElementById('rolesMatrix').innerHTML = '<p class="empty-state">Roles indisponibles hors connexion</p>';
+                this.el('matrix').innerHTML = '<p class="empty-state">Roles indisponibles hors connexion</p>';
             }
         },
 
         render() {
             if (!this.data) return;
             const editable = App.can('roles.manage');
-            document.getElementById('rolesSave').style.display = editable ? '' : 'none';
-            document.getElementById('rolesReset').style.display = editable ? '' : 'none';
-            document.getElementById('rolesHint').textContent = editable
+            this.el('save').style.display = editable ? '' : 'none';
+            this.el('reset').style.display = editable ? '' : 'none';
+            this.el('hint').textContent = editable
                 ? 'Reserve a Docteur PC : cochez ce que chaque role peut faire dans ce restaurant. Le proprietaire a tous les droits sauf celui-ci. Les changements s\'appliquent aux appareils connectes en quelques secondes.'
                 : 'Seul Docteur PC peut modifier ces permissions.';
             const groups = [];
@@ -751,9 +759,9 @@ const App = {
                     const locked = !editable || r === 'proprietaire' || p.designerOnly;
                     const on = (this.draft[r] || []).includes(p.key);
                     return `<td class="role-col"><input type="checkbox" ${on ? 'checked' : ''} ${locked ? 'disabled' : ''}
-                        aria-label="${App.esc(App.roleLabel(r) + ' : ' + p.label)}" onchange="App.roles.toggle('${r}', '${p.key}', this.checked)"></td>`;
+                        aria-label="${App.esc(App.roleLabel(r) + ' : ' + p.label)}" onchange="${this.self}.toggle('${r}', '${p.key}', this.checked)"></td>`;
                 }).join('')}</tr>`).join('')).join('');
-            document.getElementById('rolesMatrix').innerHTML = `<table class="data-table roles-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
+            this.el('matrix').innerHTML = `<table class="data-table roles-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
         },
 
         toggle(role, perm, on) {
@@ -769,16 +777,16 @@ const App = {
         },
 
         async save() {
-            const btn = document.getElementById('rolesSave');
+            const btn = this.el('save');
             btn.disabled = true;
             try {
                 const roles = {};
                 this.ORDER.filter(r => r !== 'proprietaire').forEach(r => { roles[r] = this.draft[r] || []; });
-                this.data = await App.api('/roles', { method: 'PUT', body: { roles } });
+                this.data = await App.api(this.url, { method: 'PUT', body: { roles } });
                 this.draft = JSON.parse(JSON.stringify(this.data.roles));
                 this.render();
                 App.toast('Permissions enregistrees');
-                App.audit.load();
+                if (this === App.roles) App.audit.load();
             } catch (e) {
                 App.toast(e.status ? e.message : 'Connexion impossible', 'error');
             } finally {
@@ -1141,7 +1149,8 @@ const App = {
     HOME_BY_ROLE: { cuisinier: 'cuisine', stock: 'stocks', comptable: 'rapports' },
 
     can(perm) {
-        if (perm === 'page.plateforme') return !!(this.currentUser && this.currentUser.isPlatform);
+        // Only in the designer's own space: inside a restaurant (even as designer) the console is not shown.
+        if (perm === 'page.plateforme') return this.inDesignerHome();
         if (perm.startsWith('page.') && this.inDesignerHome()) return false;
         const perms = (this.currentUser && this.currentUser.perms) || [];
         const alias = this.PAGE_ALIASES[perm];
@@ -1172,6 +1181,7 @@ const App = {
     },
 
     updateBadge() {
+        document.getElementById('activeOrdersBadge').hidden = this.inDesignerHome();
         const active = this.data.orders.filter(o => o.status === 'en_cours' || o.status === 'prete').length;
         document.getElementById('activeOrdersBadge').textContent = `${active} commande${active !== 1 ? 's' : ''}`;
     },
@@ -4963,6 +4973,7 @@ const App = {
             if (!this.isActive() || !App.can('page.plateforme')) return;
             if (!this.data) { if (Date.now() - this.loadedAt > 5000) { this.loadedAt = Date.now(); this.load(); } return; }
             const list = this.data.restaurants;
+            this.restoOptions();
             const q = (document.getElementById('platSearch').value || '').trim().toLowerCase();
             const rows = list.filter(r => !q || (r.name + ' ' + r.slug + ' ' + r.city).toLowerCase().includes(q));
             const count = s => list.filter(r => r.subscription.state === s).length;
@@ -5002,6 +5013,45 @@ const App = {
         },
 
         staff: null,
+        selected: '',
+
+        selectResto(rid) {
+            this.selected = rid;
+            const r = this.find(rid);
+            const add = document.getElementById('platStaffAdd');
+            add.disabled = !r;
+            add.title = r ? `Ajouter un compte a ${r.name}` : "Choisissez d'abord un restaurant";
+            const panel = document.getElementById('platRolesPanel');
+            panel.hidden = !r;
+            if (r) {
+                document.getElementById('platRolesTitle').textContent = `Roles et permissions : ${r.name}`;
+                document.getElementById('platRolesMatrix').innerHTML = '<p class="empty-state">Chargement...</p>';
+                App.platRoles.data = null;
+                App.platRoles.url = `/platform/restaurants/${rid}/roles`;
+                App.platRoles.load();
+            } else {
+                App.platRoles.url = null;
+            }
+            this.renderStaff();
+        },
+
+        restoOptions() {
+            const sel = document.getElementById('platStaffResto');
+            if (!sel || !this.data) return;
+            const sig = this.data.restaurants.map(r => r.id + ':' + r.name + ':' + r.slug).join('|');
+            if (sig === this.optionsSig) return;
+            this.optionsSig = sig;
+            const keep = this.selected;
+            sel.innerHTML = '<option value="">Tous les restaurants</option>' + this.data.restaurants
+                .map(r => `<option value="${App.esc(r.id)}">${App.esc(r.name)} (${App.esc(r.slug)})</option>`).join('');
+            if (keep && !this.find(keep)) this.selectResto('');
+            else sel.value = keep;
+        },
+
+        addStaff() {
+            const r = this.find(this.selected);
+            if (r) App.personnel.openModal({ rid: r.id, name: r.name });
+        },
 
         async loadStaff() {
             try {
@@ -5015,20 +5065,26 @@ const App = {
         renderStaff() {
             if (!this.staff) return;
             const q = (document.getElementById('platStaffSearch').value || '').trim().toLowerCase();
-            const rows = this.staff.filter(x => !q || (x.name + ' ' + x.username + ' ' + x.restaurant.name + ' ' + x.restaurant.slug).toLowerCase().includes(q));
+            const rows = this.staff.filter(x => !x.designer && (!this.selected || x.restaurant.id === this.selected)
+                && (!q || (x.name + ' ' + x.username + ' ' + x.restaurant.name + ' ' + x.restaurant.slug).toLowerCase().includes(q)));
             const when = ts => ts ? new Date(ts).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Jamais';
-            const mine = App.restaurant && App.restaurant.id;
             document.getElementById('platStaffBody').innerHTML = rows.length ? rows.map(x => `<tr>
                     <td><strong>${App.esc(x.name)}</strong>${x.mustChangePassword ? '<div class="diff-note">Mot de passe provisoire</div>' : ''}</td>
                     <td><code>${App.esc(x.username)}</code></td>
                     <td>${x.designer ? '<span class="sub-badge designer">Concepteur</span>' : App.esc(App.roleLabel(x.role))}</td>
                     <td>${App.esc(x.restaurant.name)} <code>${App.esc(x.restaurant.slug)}</code></td>
                     <td>${App.esc(when(x.lastLogin))}</td>
-                    <td class="op-actions">${x.designer ? '' : `
+                    <td class="op-actions">
+                        <button class="btn btn-small btn-secondary" onclick="App.personnel.edit(${x.id}, App.plateforme.scopeOf(${x.id}))">Modifier</button>
                         <button class="btn btn-small btn-secondary" onclick="App.plateforme.resetPassword(${x.id})">Mot de passe provisoire</button>
-                        ${x.restaurant.id === mine ? '' : `<button class="btn btn-small btn-secondary" onclick="App.enterRestaurant('${App.esc(x.restaurant.id)}', 'personnel')">Ouvrir son restaurant</button>`}`}
+                        <button class="btn btn-small btn-danger" onclick="App.personnel.remove(${x.id}, App.plateforme.scopeOf(${x.id}))">Supprimer</button>
                     </td>
                 </tr>`).join('') : '<tr><td colspan="6" class="empty-cell">Aucun compte</td></tr>';
+        },
+
+        scopeOf(id) {
+            const x = this.staff && this.staff.find(s => s.id === id);
+            return x ? { rid: x.restaurant.id, name: x.restaurant.name } : null;
         },
 
         async resetPassword(id) {
@@ -5282,6 +5338,21 @@ const App = {
     // PERSONNEL
     personnel: {
         editingId: null,
+        // null: the restaurant currently open; { rid }: a restaurant managed from the designer space.
+        scope: null,
+
+        base() {
+            return this.scope ? `/platform/restaurants/${this.scope.rid}/staff` : '/staff';
+        },
+
+        list() {
+            return this.scope ? (App.plateforme.staff || []) : App.staff;
+        },
+
+        async refresh() {
+            if (this.scope) await App.plateforme.loadStaff();
+            else await App.loadStaff();
+        },
 
         render() {
             const grid = document.getElementById('personnelGrid');
@@ -5311,9 +5382,10 @@ const App = {
             }).join('');
         },
 
-        openModal() {
+        openModal(scope = null) {
+            this.scope = scope;
             this.editingId = null;
-            document.getElementById('modalPersonnelTitle').textContent = 'Ajouter un membre';
+            document.getElementById('modalPersonnelTitle').textContent = scope ? `Ajouter un compte : ${scope.name}` : 'Ajouter un membre';
             document.getElementById('staffName').value = '';
             document.getElementById('staffUsername').value = '';
             document.getElementById('staffPassword').value = '';
@@ -5327,17 +5399,18 @@ const App = {
         // Only an owner may hand out the owner role; nobody can change their own role.
         prepareRoleSelect(member) {
             const sel = document.getElementById('staffRole');
-            const owner = App.currentUser.role === 'proprietaire';
+            const owner = !!this.scope || App.currentUser.role === 'proprietaire';
             sel.querySelector('option[value="proprietaire"]').hidden = !owner;
             sel.querySelector('option[value="proprietaire"]').disabled = !owner;
-            sel.disabled = !!member && member.id === App.currentUser.id;
+            sel.disabled = !this.scope && !!member && member.id === App.currentUser.id;
         },
 
-        edit(id) {
-            const s = App.staff.find(x => x.id === id);
+        edit(id, scope = null) {
+            this.scope = scope;
+            const s = this.list().find(x => x.id === id);
             if (!s) return;
             this.editingId = id;
-            document.getElementById('modalPersonnelTitle').textContent = 'Modifier le membre';
+            document.getElementById('modalPersonnelTitle').textContent = scope ? `Modifier le compte : ${scope.name}` : 'Modifier le membre';
             document.getElementById('staffName').value = s.name;
             document.getElementById('staffUsername').value = s.username;
             document.getElementById('staffPassword').value = '';
@@ -5362,38 +5435,46 @@ const App = {
 
             try {
                 if (this.editingId) {
-                    const res = await App.api('/staff/' + this.editingId, { method: 'PUT', body: { name, username, password, role } });
-                    if (res.staff.id === App.currentUser.id) {
+                    const res = await App.api(this.base() + '/' + this.editingId, { method: 'PUT', body: { name, username, password, role } });
+                    if (!this.scope && res.staff.id === App.currentUser.id) {
                         App.currentUser = { ...App.currentUser, ...res.staff };
                         localStorage.setItem('sissiman-user', JSON.stringify(App.currentUser));
                     }
                     App.toast('Membre modifie');
                 } else {
-                    await App.api('/staff', { method: 'POST', body: { name, username, password, role } });
+                    await App.api(this.base(), { method: 'POST', body: { name, username, password, role } });
                     App.toast('Membre ajoute : il choisira son mot de passe a la 1re connexion');
                 }
             } catch (e) {
                 App.toast(e.status ? e.message : 'Connexion impossible', 'error');
                 return;
             }
-            await App.loadStaff();
+            await this.refresh();
             this.closeModal();
             App.render();
         },
 
-        async remove(id) {
-            if (!confirm('Supprimer ce membre ?')) return;
+        async remove(id, scope = null) {
+            this.scope = scope;
+            const s = this.list().find(x => x.id === id);
+            if (!confirm(s ? `Supprimer le compte de ${s.name} (${s.username}) ?` : 'Supprimer ce membre ?')) return;
             try {
-                await App.api('/staff/' + id, { method: 'DELETE' });
+                await App.api(this.base() + '/' + id, { method: 'DELETE' });
             } catch (e) {
                 App.toast(e.status ? e.message : 'Connexion impossible', 'error');
                 return;
             }
-            await App.loadStaff();
+            await this.refresh();
             App.toast('Membre supprime');
             App.render();
         }
     }
 };
+
+// Roles of a restaurant chosen in the designer space: same matrix, its own elements and endpoint.
+App.platRoles = Object.assign(Object.create(App.roles), {
+    data: null, draft: null, url: null, self: 'App.platRoles',
+    ids: { matrix: 'platRolesMatrix', save: 'platRolesSave', reset: 'platRolesReset', hint: 'platRolesHint' }
+});
 
 document.addEventListener('DOMContentLoaded', () => App.init());

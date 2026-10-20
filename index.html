@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=20261020j">
+    <link rel="stylesheet" href="styles.css?v=20261020l">
 </head>
 <body>
     <!-- LOGIN -->
@@ -716,8 +716,12 @@
             </div></div>
 
             <div class="plat-accounts-head">
-                <h3>Tous les comptes</h3>
-                <input type="search" class="stock-search" id="platStaffSearch" placeholder="Nom, identifiant ou restaurant..." oninput="App.plateforme.renderStaff()" aria-label="Rechercher un compte">
+                <h3>Personnel des restaurants</h3>
+                <div class="plat-staff-tools">
+                    <select id="platStaffResto" onchange="App.plateforme.selectResto(this.value)" aria-label="Restaurant"><option value="">Tous les restaurants</option></select>
+                    <input type="search" class="stock-search" id="platStaffSearch" placeholder="Nom ou identifiant..." oninput="App.plateforme.renderStaff()" aria-label="Rechercher un compte">
+                    <button class="btn btn-primary" id="platStaffAdd" onclick="App.plateforme.addStaff()" disabled title="Choisissez d'abord un restaurant">+ Ajouter un compte</button>
+                </div>
             </div>
             <div class="panel"><div class="panel-body table-scroll stock-table-wrap">
                 <table class="data-table">
@@ -725,6 +729,18 @@
                     <tbody id="platStaffBody"><tr><td colspan="6" class="empty-cell">Chargement...</td></tr></tbody>
                 </table>
             </div></div>
+
+            <div class="audit-panel roles-panel" id="platRolesPanel" hidden>
+                <div class="audit-header">
+                    <h3 id="platRolesTitle">Roles et permissions</h3>
+                    <div class="roles-actions">
+                        <button class="btn btn-small btn-secondary" id="platRolesReset" onclick="App.platRoles.resetDefaults()">Valeurs par defaut</button>
+                        <button class="btn btn-small btn-primary" id="platRolesSave" onclick="App.platRoles.save()">Enregistrer</button>
+                    </div>
+                </div>
+                <p class="roles-hint" id="platRolesHint"></p>
+                <div class="table-scroll" id="platRolesMatrix"><p class="empty-state">Chargement...</p></div>
+            </div>
 
             <div class="modal" id="modalPlatCreate">
                 <div class="modal-content">
@@ -842,45 +858,47 @@
                 <div class="audit-list" id="auditList"><p class="empty-state">Chargement...</p></div>
             </div>
 
-            <div class="modal" id="modalPersonnel">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h3 id="modalPersonnelTitle">Ajouter un membre</h3>
-                        <button class="modal-close" onclick="App.personnel.closeModal()">&times;</button>
+        </section>
+
+        <!-- Fenetre partagee : personnel du restaurant ouvert, ou d'un restaurant choisi depuis l'Espace Concepteur -->
+        <div class="modal" id="modalPersonnel">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="modalPersonnelTitle">Ajouter un membre</h3>
+                    <button class="modal-close" onclick="App.personnel.closeModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>Nom complet</label>
+                        <input type="text" id="staffName" placeholder="Ex: Moussa Traore">
                     </div>
-                    <div class="modal-body">
-                        <div class="form-group">
-                            <label>Nom complet</label>
-                            <input type="text" id="staffName" placeholder="Ex: Moussa Traore">
-                        </div>
-                        <div class="form-group">
-                            <label>Identifiant</label>
-                            <input type="text" id="staffUsername" placeholder="Ex: moussa">
-                        </div>
-                        <div class="form-group">
-                            <label>Mot de passe</label>
-                            <input type="password" id="staffPassword" placeholder="Mot de passe" autocomplete="new-password">
-                        </div>
-                        <div class="form-group">
-                            <label>Role</label>
-                            <select id="staffRole">
-                                <option value="serveur">Serveur</option>
-                                <option value="caissier">Caissier</option>
-                                <option value="cuisinier">Cuisinier</option>
-                                <option value="stock">Gestionnaire de stock</option>
-                                <option value="comptable">Comptable</option>
-                                <option value="gerant">Gerant</option>
-                                <option value="proprietaire">Proprietaire</option>
-                            </select>
-                        </div>
+                    <div class="form-group">
+                        <label>Identifiant</label>
+                        <input type="text" id="staffUsername" placeholder="Ex: moussa">
                     </div>
-                    <div class="modal-footer">
-                        <button class="btn btn-secondary" onclick="App.personnel.closeModal()">Annuler</button>
-                        <button class="btn btn-primary" onclick="App.personnel.save()">Enregistrer</button>
+                    <div class="form-group">
+                        <label>Mot de passe</label>
+                        <input type="password" id="staffPassword" placeholder="Mot de passe" autocomplete="new-password">
+                    </div>
+                    <div class="form-group">
+                        <label>Role</label>
+                        <select id="staffRole">
+                            <option value="serveur">Serveur</option>
+                            <option value="caissier">Caissier</option>
+                            <option value="cuisinier">Cuisinier</option>
+                            <option value="stock">Gestionnaire de stock</option>
+                            <option value="comptable">Comptable</option>
+                            <option value="gerant">Gerant</option>
+                            <option value="proprietaire">Proprietaire</option>
+                        </select>
                     </div>
                 </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" onclick="App.personnel.closeModal()">Annuler</button>
+                    <button class="btn btn-primary" onclick="App.personnel.save()">Enregistrer</button>
+                </div>
             </div>
-        </section>
+        </div>
     </main>
 
     <div class="modal" id="modalPassword" data-locked="false">
@@ -996,6 +1014,6 @@
     <div class="viz-tip" id="vizTip" role="tooltip" hidden></div>
     <div id="printArea" aria-hidden="true"></div>
 
-    <script src="app.js?v=20261020j"></script>
+    <script src="app.js?v=20261020l"></script>
 </body>
 </html>

@@ -1457,6 +1457,38 @@ async function platformDelete(request, db, user, id) {
     return platformList(db);
 }
 
+// The designer manages a restaurant's staff and roles from their own space: the regular
+// staff/roles handlers run as if the designer were that restaurant's owner.
+async function asOwnerOf(db, user, rid) {
+    if (rid === PLATFORM_RID) return null;
+    const r = await db.prepare('SELECT id FROM restaurants WHERE id = ?').bind(rid).first();
+    return r ? { ...user, rid, role: 'proprietaire', perms: new Set(PERM_KEYS), name: user.name + ' (Docteur PC)' } : null;
+}
+
+async function platformRestaurantStaff(request, db, user, rid, staffId) {
+    const method = request.method;
+    const owner = await asOwnerOf(db, user, rid);
+    if (!owner) return fail(404, 'Restaurant introuvable');
+    if (staffId == null && method === 'GET') {
+        const { results } = await db.prepare(`SELECT s.id, s.username, s.name, s.role, s.must_change_pw,
+                (SELECT MAX(a.at) FROM audit a WHERE a.staff_id = s.id AND a.action = 'login') AS last_login
+            FROM staff s WHERE s.restaurant_id = ? ORDER BY s.id`).bind(rid).all();
+        return json({ staff: results });
+    }
+    if (staffId == null && method === 'POST') return createStaff(request, db, owner);
+    if (staffId != null && method === 'PUT') return updateStaff(request, db, staffId, owner);
+    if (staffId != null && method === 'DELETE') return deleteStaff(db, staffId, owner);
+    return fail(404, 'Introuvable');
+}
+
+async function platformRestaurantRoles(request, db, user, rid) {
+    const owner = await asOwnerOf(db, user, rid);
+    if (!owner) return fail(404, 'Restaurant introuvable');
+    if (request.method === 'GET') return getRoles(db, rid);
+    if (request.method === 'PUT') return updateRoles(request, db, owner);
+    return fail(404, 'Introuvable');
+}
+
 // The designer opens any restaurant (as its owner) or goes back home; it is tied to this login session only.
 async function platformEnter(db, user, id) {
     const target = id === user.home_rid ? null : id;
@@ -1476,6 +1508,9 @@ async function handlePlatform(request, db, user, route) {
         return platformEnter(db, user, typeof b.restaurantId === 'string' && b.restaurantId ? b.restaurantId : user.home_rid);
     }
     if (route === '/platform/restaurants' && method === 'GET') return platformList(db);
+    const rs = route.match(/^\/platform\/restaurants\/(r_[a-z0-9]{1,40})\/(staff|roles)(?:\/(\d+))?$/);
+    if (rs && rs[2] === 'staff') return platformRestaurantStaff(request, db, user, rs[1], rs[3] ? parseInt(rs[3], 10) : null);
+    if (rs && rs[2] === 'roles' && !rs[3]) return platformRestaurantRoles(request, db, user, rs[1]);
     if (route === '/platform/staff' && method === 'GET') return platformStaff(db);
     const pw = route.match(/^\/platform\/staff\/(\d+)\/password$/);
     if (pw && method === 'POST') return platformStaffPassword(db, user, parseInt(pw[1], 10));

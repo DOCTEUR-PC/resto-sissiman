@@ -3231,3 +3231,9 @@ pre.welcome-text { white-space: pre-wrap; user-select: all; }
 /* Suppression d'un restaurant */
 .danger-note { padding: 0.7rem 0.9rem; border-left: 4px solid var(--st-critical, #c0392b); background: var(--danger-bg); border-radius: var(--radius-sm); margin-bottom: 0.75rem; }
 .modal-footer-inline { display: flex; justify-content: flex-end; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
+
+/* Personnel des restaurants (Espace Concepteur) */
+.plat-staff-tools { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+.plat-staff-tools select { padding: 0.55rem 0.8rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; font-size: 0.88rem; max-width: 100%; }
+#platRolesPanel { margin-top: 1.25rem; }
+#platRolesPanel[hidden] { display: none; }
