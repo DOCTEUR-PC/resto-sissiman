@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Menu · Restaurant Sissiman</title>
-    <meta name="description" content="Le menu du Restaurant Sissiman a Bobo-Dioulasso : plats, boissons et prix en FCFA.">
+    <title>Menu</title>
+    <meta name="description" content="Menu en ligne : plats, boissons et prix en FCFA.">
     <meta name="theme-color" content="#1a1520">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -54,8 +54,8 @@
 </head>
 <body>
     <header class="hero">
-        <h1>Restaurant <span>Sissiman</span></h1>
-        <p id="city">Bobo-Dioulasso, Burkina Faso</p>
+        <h1 id="brand">Menu</h1>
+        <p id="city"></p>
         <div class="table-chip" id="tableChip" hidden></div>
     </header>
     <div class="bar">
@@ -72,6 +72,8 @@
             var fmt = function (n) { return new Intl.NumberFormat('fr-FR').format(n) + ' FCFA'; };
             var params = new URLSearchParams(location.search);
             var table = params.get('table');
+            var code = (params.get('r') || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+            var cacheKey = 'sissiman-public-menu' + (code ? '-' + code : '');
             if (table && /^[0-9A-Za-z-]{1,8}$/.test(table)) {
                 var chip = document.getElementById('tableChip');
                 chip.textContent = 'Table ' + table;
@@ -82,6 +84,10 @@
                 var d = state.data;
                 var main = document.getElementById('menu');
                 if (!d) return;
+                var name = d.restaurant.name || 'Menu', cut = name.lastIndexOf(' ');
+                document.getElementById('brand').innerHTML = cut > 0 ? esc(name.slice(0, cut)) + ' <span>' + esc(name.slice(cut + 1)) + '</span>' : '<span>' + esc(name) + '</span>';
+                document.getElementById('city').textContent = d.restaurant.city || '';
+                document.title = 'Menu · ' + name;
                 var q = state.query.trim().toLowerCase();
                 var cats = d.categories.filter(function (c) { return d.items.some(function (i) { return i.category === c.id; }); });
                 var others = d.items.filter(function (i) { return !d.categories.some(function (c) { return c.id === i.category; }); });
@@ -121,17 +127,17 @@
             document.getElementById('search').addEventListener('input', function (e) { state.query = e.target.value; render(); });
 
             try {
-                var cached = localStorage.getItem('sissiman-public-menu');
+                var cached = localStorage.getItem(cacheKey);
                 if (cached) { state.data = JSON.parse(cached); render(); }
             } catch (e) { /* stockage indisponible */ }
 
-            fetch('/api/public/menu').then(function (r) {
+            fetch('/api/public/menu' + (code ? '?r=' + encodeURIComponent(code) : '')).then(function (r) {
                 if (!r.ok) throw new Error('HTTP ' + r.status);
                 return r.json();
             }).then(function (data) {
                 state.data = data;
                 state.offline = false;
-                try { localStorage.setItem('sissiman-public-menu', JSON.stringify(data)); } catch (e) { /* stockage plein */ }
+                try { localStorage.setItem(cacheKey, JSON.stringify(data)); } catch (e) { /* stockage plein */ }
                 render();
             }).catch(function () {
                 if (state.data) { state.offline = true; render(); }

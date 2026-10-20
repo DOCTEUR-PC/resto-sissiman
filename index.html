@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Restaurant Sissiman</title>
+    <title>Resto Docteur PC</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=20261020b">
+    <link rel="stylesheet" href="styles.css?v=20261020c">
 </head>
 <body>
     <!-- LOGIN -->
@@ -19,10 +19,14 @@
         <div class="login-credit" id="loginCredit"></div>
         <div class="login-card">
             <div class="login-logo">
-                <h1>Restaurant <span>Sissiman</span> ✦</h1>
+                <h1 id="loginBrand">Resto <span>Docteur PC</span> ✦</h1>
                 <p>Espace personnel</p>
             </div>
             <form id="loginForm" onsubmit="return App.auth.login(event)">
+                <div class="form-group">
+                    <label>Code restaurant</label>
+                    <input type="text" id="loginRestaurant" placeholder="Ex: sissiman" autocomplete="organization" autocapitalize="none" spellcheck="false">
+                </div>
                 <div class="form-group">
                     <label>Identifiant</label>
                     <input type="text" id="loginUser" placeholder="Nom d'utilisateur" required autocomplete="username">
@@ -34,13 +38,13 @@
                 <div class="login-error" id="loginError"></div>
                 <button type="submit" class="btn btn-primary btn-large" style="width:100%">Se connecter</button>
             </form>
-            <div class="login-footer">Bobo-Dioulasso, Burkina Faso</div>
+            <div class="login-footer" id="loginCity">Une solution Docteur PC · Bobo-Dioulasso</div>
         </div>
     </div>
 
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
-            <h1 class="logo">Restaurant <span>Sissiman</span> ✦</h1>
+            <h1 class="logo" id="sidebarBrand">Resto <span>Docteur PC</span> ✦</h1>
         </div>
         <nav class="sidebar-nav">
             <a href="#" class="nav-item active" data-page="dashboard" data-perm="page.dashboard">
@@ -75,6 +79,10 @@
             <a href="#" class="nav-item" data-page="rapports" data-perm="page.rapports">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
                 Rapports
+            </a>
+            <a href="#" class="nav-item" data-page="plateforme" data-perm="page.plateforme">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 17.5h7M17.5 14v7"/></svg>
+                Plateforme
             </a>
             <a href="#" class="nav-item" data-page="personnel" data-perm="page.personnel">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
@@ -130,6 +138,7 @@
                 </div>
             </div>
         </header>
+        <div class="sub-banner" id="subBanner" role="status" hidden></div>
 
         <!-- DASHBOARD -->
         <section class="page active" id="page-dashboard">
@@ -692,6 +701,109 @@
             <div class="report" id="reportView"><p class="empty-state">Chargement...</p></div>
         </section>
 
+        <!-- PLATEFORME (Docteur PC) -->
+        <section class="page" id="page-plateforme">
+            <div class="stock-summary" id="platSummary"></div>
+            <div class="page-actions">
+                <input type="search" class="stock-search" id="platSearch" placeholder="Rechercher un restaurant..." oninput="App.plateforme.render()" aria-label="Rechercher un restaurant">
+                <button class="btn btn-primary" onclick="App.plateforme.openCreate()">+ Nouveau restaurant</button>
+            </div>
+            <div class="panel"><div class="panel-body table-scroll stock-table-wrap">
+                <table class="data-table">
+                    <thead><tr><th>Restaurant</th><th>Code</th><th>Formule</th><th>Abonnement</th><th>Echeance</th><th>Personnel</th><th>Activite (30 j)</th><th></th></tr></thead>
+                    <tbody id="platBody"><tr><td colspan="8" class="empty-cell">Chargement...</td></tr></tbody>
+                </table>
+            </div></div>
+
+            <div class="modal" id="modalPlatCreate">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>Nouveau restaurant</h3>
+                        <button class="modal-close" onclick="App.plateforme.close('modalPlatCreate')">&times;</button>
+                    </div>
+                    <div class="modal-body" id="platCreateBody">
+                        <div class="form-group"><label>Nom du restaurant</label><input type="text" id="pcName" maxlength="80" placeholder="Ex: Maquis Chez Awa" oninput="App.plateforme.suggestSlug()"></div>
+                        <div class="form-row-2">
+                            <div class="form-group"><label>Ville</label><input type="text" id="pcCity" maxlength="80" placeholder="Ex: Ouagadougou"></div>
+                            <div class="form-group"><label>Telephone</label><input type="tel" id="pcPhone" maxlength="30" placeholder="Ex: 70 00 00 00"></div>
+                        </div>
+                        <div class="form-group"><label>Code restaurant (connexion et menu)</label><input type="text" id="pcSlug" maxlength="32" placeholder="ex: chez-awa" autocapitalize="none" spellcheck="false"></div>
+                        <div class="form-row-2">
+                            <div class="form-group"><label>Formule</label><select id="pcPlan"></select></div>
+                            <div class="form-group"><label>Periode d'essai (jours)</label><input type="number" id="pcTrial" min="0" max="90" value="14"></div>
+                        </div>
+                        <div class="plat-sep">Compte du proprietaire</div>
+                        <div class="form-row-2">
+                            <div class="form-group"><label>Nom complet</label><input type="text" id="pcOwnerName" maxlength="60"></div>
+                            <div class="form-group"><label>Identifiant</label><input type="text" id="pcOwnerUser" maxlength="32" value="admin" autocapitalize="none" spellcheck="false"></div>
+                        </div>
+                        <div class="form-group"><label>Mot de passe provisoire (a changer a la 1re connexion)</label><input type="text" id="pcOwnerPass" maxlength="64"></div>
+                    </div>
+                    <div class="modal-footer" id="platCreateFooter">
+                        <button class="btn btn-secondary" onclick="App.plateforme.close('modalPlatCreate')">Annuler</button>
+                        <button class="btn btn-primary" id="pcSave" onclick="App.plateforme.create()">Creer le restaurant</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal" id="modalPlatPay">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3 id="ppTitle">Enregistrer un paiement</h3>
+                        <button class="modal-close" onclick="App.plateforme.close('modalPlatPay')">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="form-hint" id="ppInfo"></p>
+                        <div class="form-row-2">
+                            <div class="form-group"><label>Duree payee</label>
+                                <select id="ppMonths"><option value="1">1 mois</option><option value="3">3 mois</option><option value="6">6 mois</option><option value="12">12 mois</option></select>
+                            </div>
+                            <div class="form-group"><label>Montant recu (FCFA)</label><input type="number" id="ppAmount" min="0" step="500"></div>
+                        </div>
+                        <div class="form-group"><label>Formule</label><select id="ppPlan"></select></div>
+                        <div class="form-group"><label>Note (moyen de paiement, reference)</label><input type="text" id="ppNote" maxlength="200" placeholder="Ex: Orange Money, ref 12345"></div>
+                        <p class="form-hint" id="ppNew"></p>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" onclick="App.plateforme.close('modalPlatPay')">Annuler</button>
+                        <button class="btn btn-primary" id="ppSave" onclick="App.plateforme.pay()">Enregistrer</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal" id="modalPlatEdit">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>Modifier le restaurant</h3>
+                        <button class="modal-close" onclick="App.plateforme.close('modalPlatEdit')">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-group"><label>Nom</label><input type="text" id="peName" maxlength="80"></div>
+                        <div class="form-row-2">
+                            <div class="form-group"><label>Ville</label><input type="text" id="peCity" maxlength="80"></div>
+                            <div class="form-group"><label>Telephone</label><input type="tel" id="pePhone" maxlength="30"></div>
+                        </div>
+                        <div class="form-group"><label>Formule</label><select id="pePlan"></select></div>
+                        <div class="form-group"><label>Notes internes</label><textarea id="peNotes" rows="2" maxlength="300"></textarea></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" onclick="App.plateforme.close('modalPlatEdit')">Annuler</button>
+                        <button class="btn btn-primary" onclick="App.plateforme.saveEdit()">Enregistrer</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal modal-large" id="modalPlatEvents">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3 id="pvTitle">Historique</h3>
+                        <button class="modal-close" onclick="App.plateforme.close('modalPlatEvents')">&times;</button>
+                    </div>
+                    <div class="modal-body table-scroll" id="pvBody"></div>
+                </div>
+            </div>
+        </section>
+
         <!-- PERSONNEL -->
         <section class="page" id="page-personnel">
             <div class="page-actions">
@@ -873,6 +985,6 @@
     <div class="viz-tip" id="vizTip" role="tooltip" hidden></div>
     <div id="printArea" aria-hidden="true"></div>
 
-    <script src="app.js?v=20261020b"></script>
+    <script src="app.js?v=20261020c"></script>
 </body>
 </html>

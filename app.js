@@ -42,6 +42,7 @@ const App = {
             const me = await this.api('/me');
             this.currentUser = me.user;
             localStorage.setItem('sissiman-user', JSON.stringify(me.user));
+            this.setRestaurant(me.restaurant);
             if (me.mustChangePassword) {
                 this.password.open(true);
                 return;
@@ -299,6 +300,7 @@ const App = {
                 const res = await App.api('/sync?since=' + this.since);
                 this.since = res.now - 5000;
                 if (res.perms) App.setPerms(res.perms);
+                if (res.restaurant) App.setRestaurant(res.restaurant);
                 const changed = this.apply(res.records);
                 if (changed) App.render();
                 if (changed || pushed) App.cacheData();
@@ -486,10 +488,12 @@ const App = {
             cuisine: 'Ecran Cuisine',
             stocks: 'Stocks & approvisionnement',
             rapports: 'Rapports & Statistiques',
+            plateforme: 'Plateforme Docteur PC',
             personnel: 'Gestion du personnel'
         };
         document.getElementById('pageTitle').textContent = titles[page] || page;
         if (page === 'personnel') { this.audit.load(); this.roles.load(); }
+        if (page === 'plateforme') this.plateforme.load();
         if (window.innerWidth <= 768) {
             document.getElementById('sidebar').classList.remove('open');
         }
@@ -544,6 +548,89 @@ const App = {
             App.toast('Mot de passe modifie');
             if (wasForced) App.start();
             return false;
+        }
+    },
+
+    // ---- restaurant courant (multi-restaurant) ----
+    restaurant: null,
+
+    setRestaurant(r) {
+        if (!r) return;
+        const changed = JSON.stringify(r) !== JSON.stringify(this.restaurant);
+        this.restaurant = r;
+        try {
+            localStorage.setItem('sissiman-restaurant', r.slug);
+            localStorage.setItem('sissiman-restaurant-data', JSON.stringify(r));
+        } catch (e) { /* stockage indisponible */ }
+        if (!changed) return;
+        this.applyBrand();
+        if (this.uiReady) this.render();
+    },
+
+    brandName() {
+        return (this.restaurant && this.restaurant.name) || 'Resto Docteur PC';
+    },
+
+    brandCity() {
+        return (this.restaurant && this.restaurant.city) || '';
+    },
+
+    brandHtml() {
+        const n = this.brandName();
+        const i = n.lastIndexOf(' ');
+        return i > 0 ? `${this.esc(n.slice(0, i))} <span>${this.esc(n.slice(i + 1))}</span>` : `<span>${this.esc(n)}</span>`;
+    },
+
+    hasFeature(f) {
+        return !!(this.restaurant && (this.restaurant.features || []).includes(f));
+    },
+
+    applyBrand() {
+        document.getElementById('sidebarBrand').innerHTML = this.brandHtml() + ' ✦';
+        document.title = this.brandName();
+    },
+
+    // The device remembers its restaurant code; a ?r= link (e.g. from the welcome message) overrides it.
+    prefillLogin() {
+        const fromUrl = new URLSearchParams(location.search).get('r');
+        let code = fromUrl || '';
+        let data = null;
+        try {
+            code = code || localStorage.getItem('sissiman-restaurant') || '';
+            data = JSON.parse(localStorage.getItem('sissiman-restaurant-data') || 'null');
+        } catch (e) { /* stockage indisponible */ }
+        const input = document.getElementById('loginRestaurant');
+        if (!input.value) input.value = code;
+        const known = data && data.slug === input.value ? data : null;
+        document.getElementById('loginBrand').innerHTML = known ? this.esc(known.name) + ' ✦' : 'Resto <span>Docteur PC</span> ✦';
+        document.getElementById('loginCity').textContent = known && known.city ? known.city : 'Une solution Docteur PC · Bobo-Dioulasso';
+        (input.value ? document.getElementById('loginUser') : input).focus();
+    },
+
+    renderSubBanner() {
+        const el = document.getElementById('subBanner');
+        const sub = this.restaurant && this.restaurant.subscription;
+        if (!el) return;
+        if (!sub || !this.currentUser) { el.hidden = true; return; }
+        const d = ts => new Date(ts).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+        const manager = this.can('staff.manage');
+        let level = null, text = '';
+        if (sub.state === 'suspendu') { level = 'critical'; text = 'Compte suspendu : consultation seulement. Contactez Docteur PC.'; }
+        else if (sub.state === 'expire') { level = 'critical'; text = `Abonnement expire depuis le ${d(sub.paidUntil)} : consultation seulement. Contactez Docteur PC pour le renouveler.`; }
+        else if (sub.state === 'retard' && manager) {
+            level = 'serious';
+            text = `Abonnement echu le ${d(sub.paidUntil)}. Sans renouvellement, l'application passera en consultation seule le ${d(sub.graceEnds)}.`;
+        } else if (sub.state === 'bientot' && manager) {
+            level = 'warning';
+            text = `${sub.trial ? "Periode d'essai" : 'Abonnement ' + sub.planLabel} : plus que ${sub.daysLeft} jour(s), jusqu'au ${d(sub.paidUntil)}. Contactez Docteur PC pour le renouveler.`;
+        } else if (sub.trial && manager) {
+            level = 'info';
+            text = `Periode d'essai (formule ${sub.planLabel}) jusqu'au ${d(sub.paidUntil)}.`;
+        }
+        el.hidden = !level;
+        if (level) {
+            el.className = 'sub-banner ' + level;
+            el.textContent = text;
         }
     },
 
@@ -738,6 +825,10 @@ const App = {
 
     auth: {
         checkSession() {
+            try {
+                const r = JSON.parse(localStorage.getItem('sissiman-restaurant-data') || 'null');
+                if (r) { App.restaurant = r; App.applyBrand(); }
+            } catch (e) { /* cache illisible */ }
             const saved = localStorage.getItem('sissiman-user');
             if (saved && App.token) {
                 try {
@@ -747,6 +838,7 @@ const App = {
                 } catch(e) { /* session locale corrompue */ }
             }
             this.clearSession();
+            App.prefillLogin();
             document.getElementById('loginScreen').classList.remove('hidden');
             App.loginBg.start();
             return false;
@@ -758,14 +850,17 @@ const App = {
             const errorEl = document.getElementById('loginError');
             const username = document.getElementById('loginUser').value.trim();
             const password = document.getElementById('loginPass').value;
+            const restaurant = document.getElementById('loginRestaurant').value.trim().toLowerCase();
             btn.disabled = true;
             errorEl.textContent = '';
             try {
-                const res = await App.api('/login', { method: 'POST', body: { username, password } });
+                const res = await App.api('/login', { method: 'POST', body: { restaurant, username, password } });
                 App.token = res.token;
                 App.currentUser = res.user;
                 localStorage.setItem('sissiman-token', res.token);
-                localStorage.setItem('sissiman-user', JSON.stringify(res.user));            } catch (err) {
+                localStorage.setItem('sissiman-user', JSON.stringify(res.user));
+                App.setRestaurant(res.restaurant);
+            } catch (err) {
                 errorEl.textContent = err.status ? err.message : 'Impossible de joindre le serveur';
                 return false;
             } finally {
@@ -794,6 +889,7 @@ const App = {
         },
 
         showLogin() {
+            App.prefillLogin();
             document.getElementById('loginScreen').classList.remove('hidden');
             document.getElementById('userDropdown').classList.remove('open');
             App.loginBg.start();
@@ -900,6 +996,8 @@ const App = {
     render() {
         this.renderUser();
         this.applyPermissions();
+        this.renderSubBanner();
+        this.plateforme.render();
         this.dashboard.render();
         this.tables.render();
         this.orders.render();
@@ -921,6 +1019,7 @@ const App = {
     HOME_BY_ROLE: { cuisinier: 'cuisine', stock: 'stocks', comptable: 'rapports' },
 
     can(perm) {
+        if (perm === 'page.plateforme') return !!(this.currentUser && this.currentUser.isPlatform);
         const perms = (this.currentUser && this.currentUser.perms) || [];
         const alias = this.PAGE_ALIASES[perm];
         return alias ? alias.some(p => perms.includes(p)) : perms.includes(perm);
@@ -2648,7 +2747,7 @@ const App = {
             const table = App.data.tables.find(t => t.id === o.tableId);
             document.getElementById('caisseTicket').innerHTML = `
                 <div class="ticket-header">
-                    <h3>Restaurant Sissiman</h3>
+                    <h3>${App.esc(App.brandName())}</h3>
                     <div>Commande #${String(o.number).padStart(3, '0')}</div>
                     <div>Table ${table ? table.number : '?'} - ${o.covers || 1} couvert(s)</div>
                     <div>${new Date(o.createdAt).toLocaleString('fr-FR')}</div>
@@ -3050,8 +3149,8 @@ const App = {
 
         head(title) {
             return `<div class="tp-center">
-                <div class="tp-name">Restaurant Sissiman</div>
-                <div>Bobo-Dioulasso, Burkina Faso</div>
+                <div class="tp-name">${App.esc(App.brandName())}</div>
+                <div>${App.esc(App.brandCity())}</div>
                 <div class="tp-title">${title}</div>
             </div>`;
         },
@@ -4257,6 +4356,15 @@ const App = {
         async render() {
             const view = document.getElementById('reportView');
             if (!view || !document.getElementById('page-rapports').classList.contains('active')) return;
+            // Monthly margin and stock reports belong to the Professionnel plan and above.
+            const allowed = {
+                mois: App.hasFeature('reports_adv'),
+                stocks: App.hasFeature('reports_adv') && App.hasFeature('stocks')
+            };
+            document.querySelectorAll('.report-tabs .stock-tab').forEach(b => {
+                b.style.display = allowed[b.dataset.report] === false ? 'none' : '';
+            });
+            if (allowed[this.type] === false) this.setType('jour');
             this.ensurePeriod();
             const monthly = this.type !== 'jour' && this.type !== 'semaine';
             document.getElementById('reportDate').hidden = monthly;
@@ -4298,7 +4406,7 @@ const App = {
             const m = this.model || await this.build();
             const charts = m.sections.map(s => s.chart ? App.dashboard.columns({ clientWidth: 680 }, s.chart) : '');
             App.tickets.print(`<header class="rp-head">
-                    <div><div class="rp-name">Restaurant Sissiman</div><div>Bobo-Dioulasso, Burkina Faso</div></div>
+                    <div><div class="rp-name">${App.esc(App.brandName())}</div><div>${App.esc(App.brandCity())}</div></div>
                     <div class="rp-title"><strong>${App.esc(m.title)}</strong><span>${App.esc(m.period)}</span></div>
                 </header>
                 <div class="rp-kpis">${m.kpis.map(k => `<div><span>${App.esc(k.label)}</span><strong>${App.esc(this.fmtCell(k.value, k.type))}</strong>${k.sub ? `<small>${App.esc(k.sub)}</small>` : ''}</div>`).join('')}</div>
@@ -4313,7 +4421,7 @@ const App = {
                 name: 'Resume',
                 widths: [34, 20, 50],
                 rows: [
-                    [{ v: 'Restaurant Sissiman - ' + m.title, bold: true }],
+                    [{ v: App.brandName() + ' - ' + m.title, bold: true }],
                     [m.period],
                     [],
                     [{ v: 'Indicateur', bold: true }, { v: 'Valeur', bold: true }, { v: 'Detail', bold: true }],
@@ -4443,7 +4551,8 @@ const App = {
 
     menuQr: {
         url(table) {
-            return location.origin + '/menu' + (table ? '?table=' + encodeURIComponent(table) : '');
+            const slug = App.restaurant ? App.restaurant.slug : '';
+            return location.origin + '/menu?r=' + encodeURIComponent(slug) + (table ? '&table=' + encodeURIComponent(table) : '');
         },
 
         open() {
@@ -4473,8 +4582,8 @@ const App = {
 
         printPoster() {
             App.tickets.print(`<div class="qr-poster">
-                <div class="qr-poster-name">Restaurant <span>Sissiman</span></div>
-                <div class="qr-poster-sub">Bobo-Dioulasso, Burkina Faso</div>
+                <div class="qr-poster-name">${App.brandHtml()}</div>
+                <div class="qr-poster-sub">${App.esc(App.brandCity())}</div>
                 <div class="qr-poster-title">Notre menu sur votre telephone</div>
                 ${App.qr.svg(this.url(), 420)}
                 <div class="qr-poster-help">Ouvrez l'appareil photo et visez le code</div>
@@ -4486,7 +4595,7 @@ const App = {
             const tables = App.data.tables.filter(t => t.status !== 'indisponible').sort((a, b) => a.number - b.number);
             if (!tables.length) { App.toast('Aucune table configuree', 'error'); return; }
             App.tickets.print(`<div class="qr-grid">${tables.map(t => `<div class="qr-card">
-                    <div class="qr-card-name">Restaurant Sissiman</div>
+                    <div class="qr-card-name">${App.esc(App.brandName())}</div>
                     ${App.qr.svg(this.url(t.number), 170)}
                     <div class="qr-card-table">Table ${t.number}</div>
                     <div class="qr-card-help">Scannez pour voir le menu</div>
@@ -4700,6 +4809,253 @@ const App = {
             m.forEach((row, y) => row.forEach((on, x) => { if (on) d += `M${x + 4},${y + 4}h1v1h-1z`; }));
             return `<svg class="qr-svg" viewBox="0 0 ${n} ${n}" width="${px}" height="${px}" shape-rendering="crispEdges" role="img" aria-label="QR code">
                 <rect width="${n}" height="${n}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+        }
+    },
+
+    // PLATEFORME (administration Docteur PC : restaurants et abonnements)
+    plateforme: {
+        data: null,
+        loadedAt: 0,
+        editing: null,
+        createFormHtml: null,
+        STATE_LABELS: { ok: 'A jour', bientot: 'Bientot echu', retard: 'En retard', expire: 'Expire', suspendu: 'Suspendu' },
+        EVENT_LABELS: { creation: 'Creation', paiement: 'Paiement', changement_formule: 'Changement de formule', suspension: 'Suspension', reactivation: 'Reactivation' },
+
+        isActive() {
+            return document.getElementById('page-plateforme').classList.contains('active');
+        },
+
+        async load() {
+            try {
+                this.data = await App.api('/platform/restaurants');
+                this.loadedAt = Date.now();
+                this.render();
+            } catch (e) {
+                document.getElementById('platBody').innerHTML = `<tr><td colspan="8" class="empty-cell">${App.esc(e.status ? e.message : 'Connexion impossible')}</td></tr>`;
+            }
+        },
+
+        render() {
+            if (!this.isActive() || !App.can('page.plateforme')) return;
+            if (!this.data) { if (Date.now() - this.loadedAt > 5000) { this.loadedAt = Date.now(); this.load(); } return; }
+            const list = this.data.restaurants;
+            const q = (document.getElementById('platSearch').value || '').trim().toLowerCase();
+            const rows = list.filter(r => !q || (r.name + ' ' + r.slug + ' ' + r.city).toLowerCase().includes(q));
+            const count = s => list.filter(r => r.subscription.state === s).length;
+            document.getElementById('platSummary').innerHTML = `
+                <div class="kpi"><span class="kpi-label">Restaurants</span><span class="kpi-value">${list.length}</span><span class="kpi-sub">${list.filter(r => r.subscription.trial).length} en essai</span></div>
+                <div class="kpi"><span class="kpi-label">A jour</span><span class="kpi-value">${count('ok')}</span><span class="kpi-sub">${count('bientot')} a renouveler sous 7 jours</span></div>
+                <div class="kpi"><span class="kpi-label">En retard</span><span class="kpi-value">${count('retard')}</span><span class="kpi-sub">Dans la semaine de grace</span></div>
+                <div class="kpi"><span class="kpi-label">Expires / suspendus</span><span class="kpi-value">${count('expire') + count('suspendu')}</span><span class="kpi-sub">En consultation seule</span></div>`;
+            const d = ts => ts ? new Date(ts).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
+            const mine = App.restaurant && App.restaurant.id;
+            document.getElementById('platBody').innerHTML = rows.length ? rows.map(r => {
+                const s = r.subscription;
+                return `<tr>
+                    <td><strong>${App.esc(r.name)}</strong>${r.city ? `<div class="diff-note">${App.esc(r.city)}${r.phone ? ' · ' + App.esc(r.phone) : ''}</div>` : ''}</td>
+                    <td><code>${App.esc(r.slug)}</code></td>
+                    <td>${App.esc(s.planLabel)}</td>
+                    <td><span class="sub-badge ${App.esc(s.state)}">${App.esc(s.trial && s.state === 'ok' ? 'Essai' : this.STATE_LABELS[s.state])}</span></td>
+                    <td>${d(s.paidUntil)}${s.state === 'ok' || s.state === 'bientot' ? `<div class="diff-note">${s.daysLeft} j restants</div>` : ''}</td>
+                    <td class="num">${r.staffCount}</td>
+                    <td class="num">${r.orders30d} cmd${r.lastActivity ? `<div class="diff-note">${d(r.lastActivity)}</div>` : ''}</td>
+                    <td class="op-actions">
+                        <button class="btn btn-small btn-primary" onclick="App.plateforme.openPay('${r.id}')">Paiement</button>
+                        <button class="btn btn-small btn-secondary" onclick="App.plateforme.openEdit('${r.id}')">Modifier</button>
+                        <button class="btn btn-small btn-secondary" onclick="App.plateforme.events('${r.id}')">Historique</button>
+                        ${r.id === mine ? '' : r.status === 'suspendu'
+                            ? `<button class="btn btn-small btn-secondary" onclick="App.plateforme.setStatus('${r.id}', 'actif')">Reactiver</button>`
+                            : `<button class="btn btn-small btn-danger" onclick="App.plateforme.setStatus('${r.id}', 'suspendu')">Suspendre</button>`}
+                    </td>
+                </tr>`;
+            }).join('') : '<tr><td colspan="8" class="empty-cell">Aucun restaurant</td></tr>';
+        },
+
+        find(id) {
+            return this.data && this.data.restaurants.find(r => r.id === id);
+        },
+
+        planOptions(selected) {
+            return (this.data ? this.data.plans : []).map(p => `<option value="${p.key}" ${p.key === selected ? 'selected' : ''}>${App.esc(p.label)}</option>`).join('');
+        },
+
+        close(id) {
+            document.getElementById(id).classList.remove('open');
+        },
+
+        slugify(s) {
+            return s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/^(restaurant|maquis|resto)\s+/, '')
+                .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
+        },
+
+        suggestSlug() {
+            const slug = document.getElementById('pcSlug');
+            if (!slug.dataset.touched) slug.value = this.slugify(document.getElementById('pcName').value);
+        },
+
+        openCreate() {
+            // The welcome message replaces the form after a creation; put the form back first.
+            const body = document.getElementById('platCreateBody');
+            if (!this.createFormHtml) this.createFormHtml = body.innerHTML; else body.innerHTML = this.createFormHtml;
+            ['pcName', 'pcCity', 'pcPhone', 'pcSlug', 'pcOwnerName'].forEach(id => { document.getElementById(id).value = ''; });
+            document.getElementById('pcSlug').dataset.touched = '';
+            document.getElementById('pcSlug').oninput = e => { e.target.dataset.touched = '1'; };
+            document.getElementById('pcOwnerUser').value = 'admin';
+            document.getElementById('pcOwnerPass').value = 'Bienvenue-' + Math.random().toString(36).slice(2, 7);
+            document.getElementById('pcTrial').value = 14;
+            document.getElementById('pcPlan').innerHTML = this.planOptions('professionnel');
+            document.getElementById('platCreateFooter').style.display = '';
+            document.getElementById('modalPlatCreate').classList.add('open');
+            document.getElementById('pcName').focus();
+        },
+
+        async create() {
+            const btn = document.getElementById('pcSave');
+            if (btn.disabled) return;
+            const v = id => document.getElementById(id).value.trim();
+            const body = {
+                name: v('pcName'), city: v('pcCity'), phone: v('pcPhone'), slug: v('pcSlug').toLowerCase(), plan: v('pcPlan'),
+                trialDays: parseInt(v('pcTrial'), 10) || 0,
+                owner: { name: v('pcOwnerName'), username: v('pcOwnerUser'), password: v('pcOwnerPass') }
+            };
+            btn.disabled = true;
+            try {
+                this.data = await App.api('/platform/restaurants', { method: 'POST', body });
+                this.render();
+                this.showWelcome(body);
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible', 'error');
+            } finally {
+                btn.disabled = false;
+            }
+        },
+
+        // Message ready to send to the new restaurant (by WhatsApp or SMS) with everything needed to start.
+        showWelcome(b) {
+            const url = `${location.origin}/?r=${encodeURIComponent(b.slug)}`;
+            const menu = `${location.origin}/menu?r=${encodeURIComponent(b.slug)}`;
+            const text = `Bienvenue sur Resto Docteur PC !\n\nRestaurant : ${b.name}\nAdresse de l'application : ${url}\nCode restaurant : ${b.slug}\nIdentifiant : ${b.owner.username}\nMot de passe provisoire : ${b.owner.password}\n(a changer a la premiere connexion)\n\nMenu en ligne pour vos clients : ${menu}`;
+            document.getElementById('platCreateBody').innerHTML = `<p class="form-hint">Restaurant cree. Transmettez ces informations au proprietaire :</p>
+                <textarea class="welcome-text" id="pcWelcome" rows="11" readonly>${App.esc(text)}</textarea>
+                <div class="menu-qr-actions">
+                    <button class="btn btn-primary" onclick="App.plateforme.copyWelcome()">Copier le message</button>
+                    <button class="btn btn-secondary" onclick="App.plateforme.close('modalPlatCreate')">Fermer</button>
+                </div>`;
+            document.getElementById('platCreateFooter').style.display = 'none';
+        },
+
+        async copyWelcome() {
+            const el = document.getElementById('pcWelcome');
+            try { await navigator.clipboard.writeText(el.value); App.toast('Message copie'); }
+            catch (e) { el.select(); App.toast('Selectionnez le texte et copiez-le', 'error'); }
+        },
+
+        openPay(id) {
+            const r = this.find(id);
+            if (!r) return;
+            this.editing = id;
+            const s = r.subscription;
+            document.getElementById('ppTitle').textContent = `Paiement : ${r.name}`;
+            document.getElementById('ppInfo').textContent = `Formule ${s.planLabel} · echeance actuelle ${new Date(s.paidUntil).toLocaleDateString('fr-FR')}`;
+            document.getElementById('ppPlan').innerHTML = this.planOptions(r.plan);
+            document.getElementById('ppAmount').value = '';
+            document.getElementById('ppNote').value = '';
+            document.getElementById('ppMonths').value = '1';
+            const update = () => {
+                const base = new Date(Math.max(Date.now(), s.paidUntil || 0));
+                base.setMonth(base.getMonth() + parseInt(document.getElementById('ppMonths').value, 10));
+                document.getElementById('ppNew').textContent = `Nouvelle echeance : ${base.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })}`;
+            };
+            document.getElementById('ppMonths').onchange = update;
+            update();
+            document.getElementById('modalPlatPay').classList.add('open');
+        },
+
+        async pay() {
+            const btn = document.getElementById('ppSave');
+            const amount = parseInt(document.getElementById('ppAmount').value, 10);
+            if (!(amount >= 0)) { App.toast('Indiquez le montant recu', 'error'); return; }
+            btn.disabled = true;
+            try {
+                this.data = await App.api(`/platform/restaurants/${this.editing}/payment`, {
+                    method: 'POST',
+                    body: { months: parseInt(document.getElementById('ppMonths').value, 10), amount, plan: document.getElementById('ppPlan').value, note: document.getElementById('ppNote').value.trim() }
+                });
+                this.close('modalPlatPay');
+                this.render();
+                App.toast('Paiement enregistre, abonnement prolonge');
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible', 'error');
+            } finally {
+                btn.disabled = false;
+            }
+        },
+
+        openEdit(id) {
+            const r = this.find(id);
+            if (!r) return;
+            this.editing = id;
+            document.getElementById('peName').value = r.name;
+            document.getElementById('peCity').value = r.city;
+            document.getElementById('pePhone').value = r.phone;
+            document.getElementById('peNotes').value = r.notes;
+            document.getElementById('pePlan').innerHTML = this.planOptions(r.plan);
+            document.getElementById('modalPlatEdit').classList.add('open');
+        },
+
+        async saveEdit() {
+            try {
+                this.data = await App.api(`/platform/restaurants/${this.editing}`, {
+                    method: 'PUT',
+                    body: {
+                        name: document.getElementById('peName').value.trim(), city: document.getElementById('peCity').value.trim(),
+                        phone: document.getElementById('pePhone').value.trim(), plan: document.getElementById('pePlan').value,
+                        notes: document.getElementById('peNotes').value.trim()
+                    }
+                });
+                this.close('modalPlatEdit');
+                this.render();
+                App.toast('Restaurant modifie');
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible', 'error');
+            }
+        },
+
+        async setStatus(id, status) {
+            const r = this.find(id);
+            if (!r) return;
+            const msg = status === 'suspendu'
+                ? `Suspendre « ${r.name} » ? Ses equipes ne pourront plus que consulter les donnees et le menu public sera masque.`
+                : `Reactiver « ${r.name} » ?`;
+            if (!confirm(msg)) return;
+            try {
+                this.data = await App.api(`/platform/restaurants/${id}/status`, { method: 'POST', body: { status } });
+                this.render();
+                App.toast(status === 'suspendu' ? 'Restaurant suspendu' : 'Restaurant reactive');
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible', 'error');
+            }
+        },
+
+        async events(id) {
+            const r = this.find(id);
+            if (!r) return;
+            document.getElementById('pvTitle').textContent = `Historique : ${r.name}`;
+            const body = document.getElementById('pvBody');
+            body.innerHTML = '<p class="empty-state">Chargement...</p>';
+            document.getElementById('modalPlatEvents').classList.add('open');
+            try {
+                const { events } = await App.api(`/platform/restaurants/${id}/events`);
+                const d = ts => ts ? new Date(ts).toLocaleDateString('fr-FR') : '';
+                body.innerHTML = events.length ? `<table class="data-table"><thead><tr><th>Date</th><th>Evenement</th><th>Formule</th><th>Duree</th><th>Montant</th><th>Echeance</th><th>Par</th><th>Note</th></tr></thead><tbody>
+                    ${events.map(e => `<tr><td>${App.esc(new Date(e.at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</td>
+                        <td>${App.esc(this.EVENT_LABELS[e.kind] || e.kind)}</td><td>${App.esc(e.plan || '')}</td><td>${e.months ? e.months + ' mois' : ''}</td>
+                        <td class="num">${e.amount == null ? '' : App.fmt(e.amount)}</td><td>${App.esc(d(e.paid_until))}</td>
+                        <td>${App.esc(e.staff_name || '')}</td><td>${App.esc(e.note || '')}</td></tr>`).join('')}</tbody></table>`
+                    : '<p class="empty-state">Aucun evenement</p>';
+            } catch (e) {
+                body.innerHTML = '<p class="empty-state">Historique indisponible</p>';
+            }
         }
     },
 
