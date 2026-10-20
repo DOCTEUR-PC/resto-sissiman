@@ -1384,6 +1384,41 @@ async function platformEvents(db, id) {
     return json({ events: results });
 }
 
+// Every account of every restaurant, for the designer's "Comptes" view.
+async function platformStaff(db) {
+    const { results } = await db.prepare(`SELECT s.id, s.username, s.name, s.role, s.is_platform, s.must_change_pw, s.created_at,
+            r.id AS rid, r.name AS r_name, r.slug,
+            (SELECT MAX(a.at) FROM audit a WHERE a.staff_id = s.id AND a.action = 'login') AS last_login
+        FROM staff s JOIN restaurants r ON r.id = s.restaurant_id ORDER BY r.created_at, r.id, s.id`).all();
+    return json({ staff: results.map(x => ({
+        id: x.id, username: x.username, name: x.name, role: x.role, designer: x.is_platform === 1,
+        mustChangePassword: x.must_change_pw === 1, createdAt: x.created_at, lastLogin: x.last_login,
+        restaurant: { id: x.rid, name: x.r_name, slug: x.slug }
+    })) });
+}
+
+// A readable one-time password (no 0/O/1/l) the designer hands over; the account must change it at next login.
+function tempPassword() {
+    const alphabet = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const bytes = crypto.getRandomValues(new Uint8Array(10));
+    return 'Tmp-' + [...bytes].map(b => alphabet[b % alphabet.length]).join('');
+}
+
+async function platformStaffPassword(db, user, id) {
+    const s = await db.prepare('SELECT id, restaurant_id, username, name, is_platform FROM staff WHERE id = ?').bind(id).first();
+    if (!s) return fail(404, 'Compte introuvable');
+    if (s.is_platform === 1) return fail(403, 'Un compte concepteur se reinitialise avec le script tools/reset-admin-password.js');
+    const pw = tempPassword();
+    const salt = randomHex(16);
+    await db.batch([
+        db.prepare('UPDATE staff SET pass_hash = ?, pass_salt = ?, must_change_pw = 1 WHERE id = ?').bind(await hashPassword(pw, salt), salt, id),
+        db.prepare('DELETE FROM sessions WHERE staff_id = ?').bind(id),
+        db.prepare('DELETE FROM login_attempts'),
+        auditStmt(db, user, 'mot_de_passe_provisoire', 'staff', id, { username: s.username }, s.restaurant_id)
+    ]);
+    return json({ ok: true, tempPassword: pw, username: s.username });
+}
+
 // The designer opens any restaurant (as its owner) or goes back home; it is tied to this login session only.
 async function platformEnter(db, user, id) {
     const target = id === user.home_rid ? null : id;
@@ -1403,6 +1438,9 @@ async function handlePlatform(request, db, user, route) {
         return platformEnter(db, user, typeof b.restaurantId === 'string' && b.restaurantId ? b.restaurantId : user.home_rid);
     }
     if (route === '/platform/restaurants' && method === 'GET') return platformList(db);
+    if (route === '/platform/staff' && method === 'GET') return platformStaff(db);
+    const pw = route.match(/^\/platform\/staff\/(\d+)\/password$/);
+    if (pw && method === 'POST') return platformStaffPassword(db, user, parseInt(pw[1], 10));
     if (route === '/platform/restaurants' && method === 'POST') return platformCreate(request, db, user);
     const m = route.match(/^\/platform\/restaurants\/(r_[a-z0-9]{1,40})(?:\/(payment|status|events))?$/);
     if (m && !m[2] && method === 'PUT') return platformUpdate(request, db, user, m[1]);

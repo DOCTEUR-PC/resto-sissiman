@@ -1076,10 +1076,18 @@ const App = {
     },
 
     renderUser() {
-        const name = this.currentUser ? this.currentUser.name : '';
+        const name = this.currentUser ? this.currentUser.name.replace(/ \(Docteur PC\)$/, '') : '';
         const initials = name ? name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) : '--';
+        const designer = !!(this.currentUser && this.currentUser.isPlatform);
         document.getElementById('userInitials').textContent = initials;
         document.getElementById('dropdownUserName').textContent = name;
+        document.getElementById('dropdownDesigner').hidden = !designer;
+        document.body.classList.toggle('designer', designer);
+    },
+
+    // The designer's own space (code docteurpc) is not a restaurant: only the platform console is shown there.
+    inDesignerHome() {
+        return !!(this.currentUser && this.currentUser.isPlatform && this.restaurant && this.restaurant.slug === 'docteurpc');
     },
 
     render() {
@@ -1109,6 +1117,7 @@ const App = {
 
     can(perm) {
         if (perm === 'page.plateforme') return !!(this.currentUser && this.currentUser.isPlatform);
+        if (perm.startsWith('page.') && this.inDesignerHome()) return false;
         const perms = (this.currentUser && this.currentUser.perms) || [];
         const alias = this.PAGE_ALIASES[perm];
         return alias ? alias.some(p => perms.includes(p)) : perms.includes(perm);
@@ -4915,6 +4924,7 @@ const App = {
         },
 
         async load() {
+            this.loadStaff();
             try {
                 this.data = await App.api('/platform/restaurants');
                 this.loadedAt = Date.now();
@@ -4963,6 +4973,53 @@ const App = {
 
         find(id) {
             return this.data && this.data.restaurants.find(r => r.id === id);
+        },
+
+        staff: null,
+
+        async loadStaff() {
+            try {
+                this.staff = (await App.api('/platform/staff')).staff;
+                this.renderStaff();
+            } catch (e) {
+                document.getElementById('platStaffBody').innerHTML = `<tr><td colspan="6" class="empty-cell">${App.esc(e.status ? e.message : 'Connexion impossible')}</td></tr>`;
+            }
+        },
+
+        renderStaff() {
+            if (!this.staff) return;
+            const q = (document.getElementById('platStaffSearch').value || '').trim().toLowerCase();
+            const rows = this.staff.filter(x => !q || (x.name + ' ' + x.username + ' ' + x.restaurant.name + ' ' + x.restaurant.slug).toLowerCase().includes(q));
+            const when = ts => ts ? new Date(ts).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Jamais';
+            const mine = App.restaurant && App.restaurant.id;
+            document.getElementById('platStaffBody').innerHTML = rows.length ? rows.map(x => `<tr>
+                    <td><strong>${App.esc(x.name)}</strong>${x.mustChangePassword ? '<div class="diff-note">Mot de passe provisoire</div>' : ''}</td>
+                    <td><code>${App.esc(x.username)}</code></td>
+                    <td>${x.designer ? '<span class="sub-badge designer">Concepteur</span>' : App.esc(App.roleLabel(x.role))}</td>
+                    <td>${App.esc(x.restaurant.name)} <code>${App.esc(x.restaurant.slug)}</code></td>
+                    <td>${App.esc(when(x.lastLogin))}</td>
+                    <td class="op-actions">${x.designer ? '' : `
+                        <button class="btn btn-small btn-secondary" onclick="App.plateforme.resetPassword(${x.id})">Mot de passe provisoire</button>
+                        ${x.restaurant.id === mine ? '' : `<button class="btn btn-small btn-secondary" onclick="App.enterRestaurant('${App.esc(x.restaurant.id)}', 'personnel')">Ouvrir son restaurant</button>`}`}
+                    </td>
+                </tr>`).join('') : '<tr><td colspan="6" class="empty-cell">Aucun compte</td></tr>';
+        },
+
+        async resetPassword(id) {
+            const x = this.staff && this.staff.find(s => s.id === id);
+            if (!x) return;
+            if (!confirm(`Donner un mot de passe provisoire a ${x.name} (${x.restaurant.name}) ?\nSon mot de passe actuel ne marchera plus et il sera deconnecte.`)) return;
+            try {
+                const res = await App.api(`/platform/staff/${id}/password`, { method: 'POST' });
+                document.getElementById('pvTitle').textContent = `Mot de passe provisoire : ${x.name}`;
+                document.getElementById('pvBody').innerHTML = `<p>Transmettez ces informations a la personne. Elle devra choisir un nouveau mot de passe a sa premiere connexion.</p>
+                    <pre class="welcome-text">Code restaurant : ${App.esc(x.restaurant.slug)}\nIdentifiant : ${App.esc(res.username)}\nMot de passe provisoire : ${App.esc(res.tempPassword)}</pre>
+                    <p class="diff-note">Ce mot de passe ne sera plus affiche apres fermeture de cette fenetre.</p>`;
+                document.getElementById('modalPlatEvents').classList.add('open');
+                this.loadStaff();
+            } catch (e) {
+                App.toast(e.message, 'error');
+            }
         },
 
         planOptions(selected) {

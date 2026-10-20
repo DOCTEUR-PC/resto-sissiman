@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=20261020f">
+    <link rel="stylesheet" href="styles.css?v=20261020g">
 </head>
 <body>
     <!-- LOGIN -->
@@ -111,7 +111,7 @@
                     <div class="user-dropdown" id="userDropdown">
                         <div class="dropdown-user">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                            <span id="dropdownUserName">--</span>
+                            <span><span id="dropdownUserName">--</span><span class="designer-tag" id="dropdownDesigner" hidden>Concepteur · tous les droits</span></span>
                         </div>
                         <div class="dropdown-divider"></div>
                         <div class="dropdown-theme">
@@ -715,6 +715,17 @@
                 </table>
             </div></div>
 
+            <div class="plat-accounts-head">
+                <h3>Tous les comptes</h3>
+                <input type="search" class="stock-search" id="platStaffSearch" placeholder="Nom, identifiant ou restaurant..." oninput="App.plateforme.renderStaff()" aria-label="Rechercher un compte">
+            </div>
+            <div class="panel"><div class="panel-body table-scroll stock-table-wrap">
+                <table class="data-table">
+                    <thead><tr><th>Nom</th><th>Identifiant</th><th>Role</th><th>Restaurant</th><th>Derniere connexion</th><th></th></tr></thead>
+                    <tbody id="platStaffBody"><tr><td colspan="6" class="empty-cell">Chargement...</td></tr></tbody>
+                </table>
+            </div></div>
+
             <div class="modal" id="modalPlatCreate">
                 <div class="modal-content">
                     <div class="modal-header">
@@ -985,6 +996,6 @@
     <div class="viz-tip" id="vizTip" role="tooltip" hidden></div>
     <div id="printArea" aria-hidden="true"></div>
 
-    <script src="app.js?v=20261020f"></script>
+    <script src="app.js?v=20261020g"></script>
 </body>
 </html>
