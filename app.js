@@ -19,6 +19,7 @@ const App = {
 
     init() {
         this.setupTheme();
+        this.setupPasswordToggles();
         if (!this.auth.checkSession()) return;
         this.start();
     },
@@ -510,6 +511,7 @@ const App = {
             document.getElementById('passwordClose').style.display = forced ? 'none' : '';
             document.getElementById('passwordNotice').style.display = forced ? '' : 'none';
             document.getElementById('passwordForm').reset();
+            App.maskPasswords();
             document.getElementById('passwordError').textContent = '';
             document.getElementById('userDropdown').classList.remove('open');
             modal.classList.add('open');
@@ -890,6 +892,7 @@ const App = {
 
         showLogin() {
             App.prefillLogin();
+            App.maskPasswords();
             document.getElementById('loginScreen').classList.remove('hidden');
             document.getElementById('userDropdown').classList.remove('open');
             App.loginBg.start();
@@ -907,6 +910,47 @@ const App = {
             this.showLogin();
             App.toast('Session expiree, reconnectez-vous', 'error');
         }
+    },
+
+    // Bouton oeil sur chaque champ mot de passe : affiche / masque la saisie.
+    setupPasswordToggles() {
+        const eye = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+        const eyeOff = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.1A10.5 10.5 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.2M6.6 6.6C3.8 8.4 2 12 2 12s3.6 7 10 7a9.8 9.8 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
+        const hide = (input, btn) => {
+            input.type = 'password';
+            btn.innerHTML = eye;
+            btn.setAttribute('aria-label', 'Afficher le mot de passe');
+            btn.setAttribute('aria-pressed', 'false');
+        };
+        document.querySelectorAll('input[type="password"]').forEach(input => {
+            if (input.parentElement.classList.contains('pw-wrap')) return;
+            const wrap = document.createElement('div');
+            wrap.className = 'pw-wrap';
+            input.parentNode.insertBefore(wrap, input);
+            wrap.appendChild(input);
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'pw-toggle';
+            hide(input, btn);
+            btn.mask = () => hide(input, btn);
+            btn.addEventListener('click', () => {
+                if (input.type === 'password') {
+                    input.type = 'text';
+                    btn.innerHTML = eyeOff;
+                    btn.setAttribute('aria-label', 'Masquer le mot de passe');
+                    btn.setAttribute('aria-pressed', 'true');
+                } else hide(input, btn);
+                input.focus();
+            });
+            wrap.appendChild(btn);
+            // Remasque apres envoi du formulaire pour ne pas laisser le mot de passe visible.
+            const form = input.closest('form');
+            if (form) form.addEventListener('submit', () => hide(input, btn));
+        });
+    },
+
+    maskPasswords() {
+        document.querySelectorAll('.pw-toggle').forEach(b => b.mask && b.mask());
     },
 
     setupTheme() {
@@ -5097,6 +5141,7 @@ const App = {
             document.getElementById('staffName').value = '';
             document.getElementById('staffUsername').value = '';
             document.getElementById('staffPassword').value = '';
+            App.maskPasswords();
             document.getElementById('staffPassword').placeholder = 'Mot de passe provisoire (8 caracteres min.)';
             this.prepareRoleSelect(null);
             document.getElementById('staffRole').value = 'serveur';
@@ -5120,6 +5165,7 @@ const App = {
             document.getElementById('staffName').value = s.name;
             document.getElementById('staffUsername').value = s.username;
             document.getElementById('staffPassword').value = '';
+            App.maskPasswords();
             document.getElementById('staffPassword').placeholder = 'Laisser vide pour ne pas changer';
             this.prepareRoleSelect(s);
             document.getElementById('staffRole').value = s.role;

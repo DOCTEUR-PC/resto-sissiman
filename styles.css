@@ -3200,3 +3200,17 @@ svg.viz { display: block; max-width: 100%; overflow: visible; }
         display: none !important;
     }
 }
+
+/* Champ mot de passe avec bouton oeil */
+.pw-wrap { position: relative; }
+.pw-wrap input { padding-right: 2.8rem !important; }
+.pw-toggle {
+    position: absolute; top: 50%; right: 0.35rem; transform: translateY(-50%);
+    width: 2.2rem; height: 2.2rem; display: grid; place-items: center;
+    border: 0; border-radius: var(--radius-sm); background: transparent;
+    color: var(--text-muted); cursor: pointer; transition: color 0.2s, background 0.2s;
+}
+.pw-toggle:hover { color: var(--text); background: rgba(212, 168, 83, 0.12); }
+.pw-toggle:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+.pw-toggle svg { width: 1.15rem; height: 1.15rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.pw-wrap input::-ms-reveal, .pw-wrap input::-ms-clear { display: none; }
