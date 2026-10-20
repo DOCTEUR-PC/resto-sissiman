@@ -8,3 +8,4 @@ wrangler.toml
 schema.sql
 migrations
 server.js
+backups
