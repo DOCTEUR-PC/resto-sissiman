@@ -4991,6 +4991,7 @@ const App = {
                         ${r.id === mine ? '' : r.status === 'suspendu'
                             ? `<button class="btn btn-small btn-secondary" onclick="App.plateforme.setStatus('${r.id}', 'actif')">Reactiver</button>`
                             : `<button class="btn btn-small btn-danger" onclick="App.plateforme.setStatus('${r.id}', 'suspendu')">Suspendre</button>`}
+                        ${r.id === mine ? '' : `<button class="btn btn-small btn-danger" onclick="App.plateforme.openDelete('${r.id}')">Supprimer</button>`}
                     </td>
                 </tr>`;
             }).join('') : '<tr><td colspan="8" class="empty-cell">Aucun restaurant</td></tr>';
@@ -5206,6 +5207,53 @@ const App = {
                 App.toast(status === 'suspendu' ? 'Restaurant suspendu' : 'Restaurant reactive');
             } catch (e) {
                 App.toast(e.status ? e.message : 'Connexion impossible', 'error');
+            }
+        },
+
+        openDelete(id) {
+            const r = this.find(id);
+            if (!r) return;
+            document.getElementById('pvTitle').textContent = `Supprimer : ${r.name}`;
+            document.getElementById('pvBody').innerHTML = `
+                <p class="danger-note"><strong>Suppression definitive.</strong> Tout sera efface : menu, tables, commandes, paiements, caisses, stocks,
+                    personnel (${r.staffCount} compte(s)), journal et historique d'abonnement. Le menu QR ne fonctionnera plus.</p>
+                <p>Une sauvegarde complete (fichier .json) sera telechargee sur cet appareil juste avant la suppression.</p>
+                <div class="form-group"><label>Pour confirmer, tapez le code du restaurant : <code>${App.esc(r.slug)}</code></label>
+                    <input type="text" id="delConfirm" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="${App.esc(r.slug)}"></div>
+                <div class="modal-footer-inline">
+                    <button class="btn btn-secondary" onclick="App.plateforme.close('modalPlatEvents')">Annuler</button>
+                    <button class="btn btn-danger" id="delGo" disabled onclick="App.plateforme.doDelete('${r.id}')">Supprimer definitivement</button>
+                </div>`;
+            const input = document.getElementById('delConfirm');
+            input.addEventListener('input', () => { document.getElementById('delGo').disabled = input.value.trim() !== r.slug; });
+            document.getElementById('modalPlatEvents').classList.add('open');
+            input.focus();
+        },
+
+        async doDelete(id) {
+            const r = this.find(id);
+            const btn = document.getElementById('delGo');
+            if (!r || document.getElementById('delConfirm').value.trim() !== r.slug) return;
+            btn.disabled = true;
+            btn.textContent = 'Sauvegarde...';
+            try {
+                // Never delete without a copy in hand: the export must download first.
+                const dump = await App.api(`/platform/restaurants/${id}/export`);
+                const day = new Date().toISOString().slice(0, 10);
+                const url = URL.createObjectURL(new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' }));
+                const a = Object.assign(document.createElement('a'), { href: url, download: `sauvegarde-${r.slug}-${day}.json` });
+                document.body.appendChild(a); a.click(); a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 10000);
+                btn.textContent = 'Suppression...';
+                this.data = await App.api(`/platform/restaurants/${id}`, { method: 'DELETE', body: { confirm: r.slug } });
+                this.close('modalPlatEvents');
+                this.render();
+                this.loadStaff();
+                App.toast(`« ${r.name} » supprime. Sauvegarde telechargee.`);
+            } catch (e) {
+                App.toast(e.status ? e.message : 'Connexion impossible : rien n\'a ete supprime', 'error');
+                btn.disabled = false;
+                btn.textContent = 'Supprimer definitivement';
             }
         },
 

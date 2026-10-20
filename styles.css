@@ -3227,3 +3227,7 @@ body.designer .user-avatar { background: linear-gradient(135deg, #1a1520, #3a2d4
 .plat-accounts-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; margin: 1.5rem 0 0.75rem; }
 .plat-accounts-head h3 { font-family: var(--font-display, inherit); font-size: 1.1rem; }
 pre.welcome-text { white-space: pre-wrap; user-select: all; }
+
+/* Suppression d'un restaurant */
+.danger-note { padding: 0.7rem 0.9rem; border-left: 4px solid var(--st-critical, #c0392b); background: var(--danger-bg); border-radius: var(--radius-sm); margin-bottom: 0.75rem; }
+.modal-footer-inline { display: flex; justify-content: flex-end; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }

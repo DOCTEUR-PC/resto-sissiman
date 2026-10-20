@@ -1420,6 +1420,43 @@ async function platformStaffPassword(db, user, id) {
     return json({ ok: true, tempPassword: pw, username: s.username });
 }
 
+// Tables holding one restaurant's data; a deletion empties all of them (and its sessions) at once.
+const TENANT_TABLES = ['records', 'counters', 'settings', 'audit', 'stock_moves', 'subscription_events', 'staff'];
+
+// Full copy of one restaurant (password hashes left out), downloaded by the console right before a deletion.
+async function platformExport(db, id) {
+    const r = await db.prepare('SELECT * FROM restaurants WHERE id = ?').bind(id).first();
+    if (!r) return fail(404, 'Restaurant introuvable');
+    const out = { exportedAt: Date.now(), restaurant: r };
+    for (const t of TENANT_TABLES) {
+        const { results } = await db.prepare(`SELECT * FROM ${t} WHERE restaurant_id = ?`).bind(id).all();
+        out[t] = t === 'staff' ? results.map(({ pass_hash, pass_salt, ...rest }) => rest) : results;
+    }
+    return json(out);
+}
+
+async function platformDelete(request, db, user, id) {
+    const b = await readBody(request) || {};
+    if (id === PLATFORM_RID || id === user.home_rid) return fail(409, 'Votre propre espace ne peut pas etre supprime');
+    const r = await db.prepare('SELECT id, slug, name FROM restaurants WHERE id = ?').bind(id).first();
+    if (!r) return fail(404, 'Restaurant introuvable');
+    // The code must be retyped: a stray click or a replayed request cannot wipe a restaurant.
+    if (b.confirm !== r.slug) return fail(400, 'Tapez exactement le code du restaurant pour confirmer');
+    if (await db.prepare('SELECT 1 FROM staff WHERE restaurant_id = ? AND is_platform = 1').bind(id).first()) {
+        return fail(409, 'Ce restaurant contient un compte concepteur : deplacez-le avant de supprimer');
+    }
+    await db.batch([
+        db.prepare('DELETE FROM sessions WHERE staff_id IN (SELECT id FROM staff WHERE restaurant_id = ?)').bind(id),
+        db.prepare('UPDATE sessions SET acting_restaurant_id = NULL WHERE acting_restaurant_id = ?').bind(id),
+        ...TENANT_TABLES.map(t => db.prepare(`DELETE FROM ${t} WHERE restaurant_id = ?`).bind(id)),
+        db.prepare('DELETE FROM restaurants WHERE id = ?').bind(id),
+        // Kept in the designer's own log, since the restaurant's log is gone with it.
+        auditStmt(db, user, 'restaurant_supprime', 'restaurants', id, { slug: r.slug, name: r.name }, user.home_rid)
+    ]);
+    matrixCache.delete(id);
+    return platformList(db);
+}
+
 // The designer opens any restaurant (as its owner) or goes back home; it is tied to this login session only.
 async function platformEnter(db, user, id) {
     const target = id === user.home_rid ? null : id;
@@ -1443,8 +1480,10 @@ async function handlePlatform(request, db, user, route) {
     const pw = route.match(/^\/platform\/staff\/(\d+)\/password$/);
     if (pw && method === 'POST') return platformStaffPassword(db, user, parseInt(pw[1], 10));
     if (route === '/platform/restaurants' && method === 'POST') return platformCreate(request, db, user);
-    const m = route.match(/^\/platform\/restaurants\/(r_[a-z0-9]{1,40})(?:\/(payment|status|events))?$/);
+    const m = route.match(/^\/platform\/restaurants\/(r_[a-z0-9]{1,40})(?:\/(payment|status|events|export))?$/);
     if (m && !m[2] && method === 'PUT') return platformUpdate(request, db, user, m[1]);
+    if (m && !m[2] && method === 'DELETE') return platformDelete(request, db, user, m[1]);
+    if (m && m[2] === 'export' && method === 'GET') return platformExport(db, m[1]);
     if (m && m[2] === 'payment' && method === 'POST') return platformPayment(request, db, user, m[1]);
     if (m && m[2] === 'status' && method === 'POST') return platformStatus(request, db, user, m[1]);
     if (m && m[2] === 'events' && method === 'GET') return platformEvents(db, m[1]);
