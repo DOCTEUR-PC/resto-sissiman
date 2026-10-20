@@ -3214,3 +3214,7 @@ svg.viz { display: block; max-width: 100%; overflow: visible; }
 .pw-toggle:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
 .pw-toggle svg { width: 1.15rem; height: 1.15rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .pw-wrap input::-ms-reveal, .pw-wrap input::-ms-clear { display: none; }
+
+/* Bandeau du mode concepteur (Docteur PC dans un restaurant) */
+.sub-banner.acting { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; background: rgba(212, 168, 83, 0.14); border-color: var(--gold); }
+.sub-banner.acting[hidden] { display: none; }

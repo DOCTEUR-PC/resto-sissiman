@@ -53,8 +53,12 @@ const App = {
         }
         await this.sync.tick();
         if (!this.currentUser) return;
+        let openPage = null;
+        try { openPage = sessionStorage.getItem('sissiman-open-page'); sessionStorage.removeItem('sissiman-open-page'); } catch (e) { /* stockage indisponible */ }
+        if (openPage && this.can('page.' + openPage)) this.navigateTo(openPage);
         if (this.sync.ready) {
-            this.seedDefaults();
+            // The Docteur PC home space is not a restaurant: no sample menu or tables there.
+            if (!this.restaurant || this.restaurant.slug !== 'docteurpc') this.seedDefaults();
             await this.loadStaff();
         } else {
             this.toast('Serveur injoignable : affichage des donnees locales', 'error');
@@ -66,9 +70,12 @@ const App = {
     async api(path, { method = 'GET', body } = {}) {
         const headers = { 'Content-Type': 'application/json' };
         if (this.token) headers.Authorization = 'Bearer ' + this.token;
+        // The server refuses to serve another restaurant than the one this tab holds in memory.
+        if (this.restaurant && this.restaurant.slug && path !== '/login') headers['X-Restaurant'] = this.restaurant.slug;
         const res = await fetch('/api' + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
+            if (res.status === 409 && data.code === 'restaurant_changed') this.reloadForRestaurant();
             if (res.status === 401 && path !== '/login') this.auth.expire();
             if (res.status === 403 && data.error === 'Changement de mot de passe requis') this.password.open(true);
             const err = new Error(data.error || 'Erreur serveur');
@@ -561,12 +568,42 @@ const App = {
         const changed = JSON.stringify(r) !== JSON.stringify(this.restaurant);
         this.restaurant = r;
         try {
-            localStorage.setItem('sissiman-restaurant', r.slug);
+            localStorage.setItem('sissiman-restaurant', r.acting && r.homeSlug ? r.homeSlug : r.slug);
             localStorage.setItem('sissiman-restaurant-data', JSON.stringify(r));
         } catch (e) { /* stockage indisponible */ }
         if (!changed) return;
         this.applyBrand();
         if (this.uiReady) this.render();
+    },
+
+    // Switching restaurant (designer) or learning that another tab did: drop every local record of the
+    // previous restaurant so nothing of it can be shown or pushed into the new one, then start afresh.
+    reloadForRestaurant(page) {
+        if (this.reloading) return;
+        this.reloading = true;
+        this.sync.stop();
+        try {
+            localStorage.removeItem('restoManagerData');
+            localStorage.removeItem('sissiman-restaurant-data');
+            if (page) sessionStorage.setItem('sissiman-open-page', page);
+        } catch (e) { /* stockage indisponible */ }
+        location.reload();
+    },
+
+    async enterRestaurant(id, page) {
+        if (this.sync.pendingCount() > 0) await this.sync.tick();
+        if (this.sync.pendingCount() > 0) {
+            this.toast('Des modifications ne sont pas encore envoyees : attendez la connexion avant de changer de restaurant', 'error');
+            return;
+        }
+        try {
+            const res = await this.api('/platform/enter', { method: 'POST', body: { restaurantId: id || '' } });
+            localStorage.setItem('sissiman-user', JSON.stringify(res.user));
+        } catch (e) {
+            this.toast(e.message, 'error');
+            return;
+        }
+        this.reloadForRestaurant(page || (id ? 'dashboard' : 'plateforme'));
     },
 
     brandName() {
@@ -615,6 +652,14 @@ const App = {
         if (!el) return;
         if (!sub || !this.currentUser) { el.hidden = true; return; }
         const d = ts => new Date(ts).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+        if (this.restaurant.acting) {
+            const st = { ok: 'abonnement a jour', bientot: 'abonnement bientot echu', retard: 'abonnement en retard', expire: 'abonnement expire', suspendu: 'compte suspendu' }[sub.state] || '';
+            el.hidden = false;
+            el.className = 'sub-banner acting';
+            el.innerHTML = `<span><strong>Mode concepteur</strong> : vous etes dans <strong>${this.esc(this.restaurant.name)}</strong> avec tous les droits (${this.esc(sub.planLabel)}, ${st}). Vos actions sont notees au journal.</span>
+                <button class="btn btn-small btn-secondary" onclick="App.enterRestaurant('')">Revenir a la plateforme</button>`;
+            return;
+        }
         const manager = this.can('staff.manage');
         let level = null, text = '';
         if (sub.state === 'suspendu') { level = 'critical'; text = 'Compte suspendu : consultation seulement. Contactez Docteur PC.'; }
@@ -4904,7 +4949,8 @@ const App = {
                     <td class="num">${r.staffCount}</td>
                     <td class="num">${r.orders30d} cmd${r.lastActivity ? `<div class="diff-note">${d(r.lastActivity)}</div>` : ''}</td>
                     <td class="op-actions">
-                        <button class="btn btn-small btn-primary" onclick="App.plateforme.openPay('${r.id}')">Paiement</button>
+                        ${r.id === mine ? '<span class="sub-badge ok">Ouvert</span>' : `<button class="btn btn-small btn-primary" onclick="App.enterRestaurant('${r.id}')" title="Entrer dans ce restaurant avec tous les droits">Ouvrir</button>`}
+                        <button class="btn btn-small btn-secondary" onclick="App.plateforme.openPay('${r.id}')">Paiement</button>
                         <button class="btn btn-small btn-secondary" onclick="App.plateforme.openEdit('${r.id}')">Modifier</button>
                         <button class="btn btn-small btn-secondary" onclick="App.plateforme.events('${r.id}')">Historique</button>
                         ${r.id === mine ? '' : r.status === 'suspendu'

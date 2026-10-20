@@ -160,21 +160,27 @@ function subscriptionOf(r, now = Date.now()) {
 }
 
 const features = r => new Set((PLANS[r.plan] || PLANS.essentiel).features);
+const ALL_FEATURES = new Set(Object.values(PLANS).flatMap(p => p.features));
 
-const publicRestaurant = r => ({
+// Home of the Docteur PC designer accounts; it holds no restaurant data and is not billed.
+const PLATFORM_RID = 'r_docteurpc';
+
+// The designer (is_platform) gets every feature wherever they are, whatever the plan.
+const publicRestaurant = (r, user) => ({
     id: r.id, slug: r.slug, name: r.name, city: r.city || '', plan: r.plan,
-    features: [...features(r)], subscription: subscriptionOf(r)
+    features: [...(user && user.is_platform === 1 ? ALL_FEATURES : features(r))], subscription: subscriptionOf(r),
+    ...(user && user.acting ? { acting: true, homeSlug: user.home_slug } : {})
 });
 
 async function restaurantBySlug(db, slug) {
     if (slug) return db.prepare('SELECT * FROM restaurants WHERE slug = ?').bind(String(slug).toLowerCase().trim()).first();
     // Devices installed before multi-restaurant send no code: they belong to the first (pilot) restaurant.
-    return db.prepare('SELECT * FROM restaurants ORDER BY created_at, id LIMIT 1').first();
+    return db.prepare('SELECT * FROM restaurants WHERE id != ? ORDER BY created_at, id LIMIT 1').bind(PLATFORM_RID).first();
 }
 
 // Fresh database only: one restaurant and its owner (also platform administrator) with a forced password change.
 async function ensureBootstrap(db) {
-    const row = await db.prepare('SELECT COUNT(*) AS n FROM restaurants').first();
+    const row = await db.prepare('SELECT COUNT(*) AS n FROM restaurants WHERE id != ?').bind(PLATFORM_RID).first();
     if (row.n > 0) return;
     const salt = randomHex(16);
     const now = Date.now();
@@ -190,13 +196,32 @@ async function ensureBootstrap(db) {
 async function getUser(request, db) {
     const m = (request.headers.get('Authorization') || '').match(/^Bearer ([a-f0-9]{64})$/);
     if (!m) return null;
+    return getUserByHash(db, await sha256(m[1]));
+}
+
+async function getUserByHash(db, tokenHash) {
     const row = await db.prepare(`SELECT s.id, s.username, s.name, s.role, s.must_change_pw, s.is_platform, s.restaurant_id,
-            r.slug, r.name AS r_name, r.city, r.plan, r.status, r.paid_until
+            x.acting_restaurant_id, r.slug, r.name AS r_name, r.city, r.plan, r.status, r.paid_until
         FROM sessions x JOIN staff s ON s.id = x.staff_id JOIN restaurants r ON r.id = s.restaurant_id
-        WHERE x.token_hash = ? AND x.expires_at > ?`).bind(await sha256(m[1]), Date.now()).first();
+        WHERE x.token_hash = ? AND x.expires_at > ?`).bind(tokenHash, Date.now()).first();
     if (!row) return null;
+    row.token_hash = tokenHash;
     row.rid = row.restaurant_id;
+    row.home_rid = row.restaurant_id;
+    row.home_slug = row.slug;
     row.restaurant = { id: row.rid, slug: row.slug, name: row.r_name, city: row.city, plan: row.plan, status: row.status, paid_until: row.paid_until };
+    // A designer who opened another restaurant works inside it as its owner; their account stays in their home.
+    if (row.is_platform === 1 && row.acting_restaurant_id && row.acting_restaurant_id !== row.home_rid) {
+        const r = await db.prepare('SELECT * FROM restaurants WHERE id = ?').bind(row.acting_restaurant_id).first();
+        if (r) {
+            row.rid = r.id;
+            row.restaurant = r;
+            row.role = 'proprietaire';
+            row.acting = true;
+            // Shown in the audit log and on tickets of that restaurant, so its staff know who acted.
+            row.name = row.name + ' (Docteur PC)';
+        }
+    }
     return row;
 }
 
@@ -250,8 +275,8 @@ async function login(request, db) {
     ]);
     return json({
         token,
-        user: { ...publicStaff(s), isPlatform: s.is_platform === 1, perms: (await roleMatrix(db, restaurant.id))[s.role] || [] },
-        restaurant: publicRestaurant(restaurant),
+        user: { ...publicStaff(s), isPlatform: s.is_platform === 1, perms: s.is_platform === 1 ? [...PERM_KEYS] : (await roleMatrix(db, restaurant.id))[s.role] || [] },
+        restaurant: publicRestaurant(restaurant, s),
         mustChangePassword: mustChange
     });
 }
@@ -285,7 +310,7 @@ async function pull(url, db, user) {
         : db.prepare('SELECT collection, id, data, deleted FROM records WHERE restaurant_id = ? AND updated_at >= ?').bind(user.rid, since);
     const { results } = await stmt.all();
     // perms travel with every pull so a change made by the owner reaches open devices within seconds.
-    return json({ now, perms: [...user.perms], restaurant: publicRestaurant(user.restaurant), records: results.filter(r => visible(user, r.collection)) });
+    return json({ now, perms: [...user.perms], restaurant: publicRestaurant(user.restaurant, user), records: results.filter(r => visible(user, r.collection)) });
 }
 
 const isInt = (n, min, max) => Number.isInteger(n) && n >= min && n <= max;
@@ -1263,7 +1288,7 @@ async function platformList(db) {
             (SELECT COUNT(*) FROM staff s WHERE s.restaurant_id = r.id) AS staff_count,
             (SELECT MAX(updated_at) FROM records x WHERE x.restaurant_id = r.id) AS last_activity,
             (SELECT COUNT(*) FROM records x WHERE x.restaurant_id = r.id AND x.collection = 'orders' AND x.updated_at > ?) AS orders_30d
-        FROM restaurants r ORDER BY r.created_at, r.id`).bind(since).all();
+        FROM restaurants r WHERE r.id != ? ORDER BY r.created_at, r.id`).bind(since, PLATFORM_RID).all();
     return json({
         plans: Object.entries(PLANS).map(([key, p]) => ({ key, label: p.label, features: p.features })),
         restaurants: results.map(r => ({
@@ -1343,7 +1368,7 @@ async function platformPayment(request, db, user, id) {
 async function platformStatus(request, db, user, id) {
     const b = await readBody(request) || {};
     if (b.status !== 'suspendu' && b.status !== 'actif') return fail(400, 'Etat invalide');
-    if (id === user.rid && b.status === 'suspendu') return fail(409, 'Vous ne pouvez pas suspendre votre propre restaurant');
+    if ((id === user.home_rid || id === PLATFORM_RID) && b.status === 'suspendu') return fail(409, 'Vous ne pouvez pas suspendre votre propre espace');
     const r = await db.prepare('SELECT * FROM restaurants WHERE id = ?').bind(id).first();
     if (!r) return fail(404, 'Restaurant introuvable');
     await db.batch([
@@ -1359,8 +1384,24 @@ async function platformEvents(db, id) {
     return json({ events: results });
 }
 
+// The designer opens any restaurant (as its owner) or goes back home; it is tied to this login session only.
+async function platformEnter(db, user, id) {
+    const target = id === user.home_rid ? null : id;
+    if (target && !await db.prepare('SELECT 1 FROM restaurants WHERE id = ?').bind(target).first()) return fail(404, 'Restaurant introuvable');
+    await db.batch([
+        db.prepare('UPDATE sessions SET acting_restaurant_id = ? WHERE token_hash = ?').bind(target, user.token_hash),
+        auditStmt(db, user, target ? 'concepteur_entree' : 'concepteur_sortie', 'restaurants', target || user.rid, null, target || user.rid)
+    ]);
+    const fresh = await getUserByHash(db, user.token_hash);
+    return json({ ok: true, restaurant: publicRestaurant(fresh.restaurant, fresh), user: { ...publicStaff(fresh), isPlatform: true, perms: [...PERM_KEYS] } });
+}
+
 async function handlePlatform(request, db, user, route) {
     const method = request.method;
+    if (route === '/platform/enter' && method === 'POST') {
+        const b = await readBody(request) || {};
+        return platformEnter(db, user, typeof b.restaurantId === 'string' && b.restaurantId ? b.restaurantId : user.home_rid);
+    }
     if (route === '/platform/restaurants' && method === 'GET') return platformList(db);
     if (route === '/platform/restaurants' && method === 'POST') return platformCreate(request, db, user);
     const m = route.match(/^\/platform\/restaurants\/(r_[a-z0-9]{1,40})(?:\/(payment|status|events))?$/);
@@ -1404,14 +1445,17 @@ async function handleApi(request, env, url) {
 
         const user = await getUser(request, db);
         if (!user) return fail(401, 'Session expiree');
-        const feats = features(user.restaurant);
+        const designer = user.is_platform === 1;
+        const feats = designer ? ALL_FEATURES : features(user.restaurant);
         const blocked = new Set(Object.entries(FEATURE_PERMS).filter(([f]) => !feats.has(f)).flatMap(([, p]) => p));
-        user.perms = new Set(((await roleMatrix(db, user.rid))[user.role] || []).filter(p => !blocked.has(p)));
+        // The designer holds every permission in every restaurant, whatever its plan or role matrix.
+        user.perms = designer ? new Set(PERM_KEYS)
+            : new Set(((await roleMatrix(db, user.rid))[user.role] || []).filter(p => !blocked.has(p)));
         const sub = subscriptionOf(user.restaurant);
-        const me = () => ({ ...publicStaff(user), isPlatform: user.is_platform === 1, perms: [...user.perms] });
+        const me = () => ({ ...publicStaff(user), isPlatform: designer, perms: [...user.perms] });
 
         if (route === '/me' && method === 'GET') {
-            return json({ user: me(), restaurant: publicRestaurant(user.restaurant), mustChangePassword: user.must_change_pw === 1 });
+            return json({ user: me(), restaurant: publicRestaurant(user.restaurant, user), mustChangePassword: user.must_change_pw === 1 });
         }
         if (route === '/logout' && method === 'POST') {
             const token = request.headers.get('Authorization').slice(7);
@@ -1422,11 +1466,17 @@ async function handleApi(request, env, url) {
         if (user.must_change_pw === 1) return fail(403, 'Changement de mot de passe requis');
 
         if (route.startsWith('/platform/')) {
-            if (user.is_platform !== 1) return fail(403, 'Reserve a l\'administration de la plateforme');
+            if (!designer) return fail(403, 'Reserve a l\'administration de la plateforme');
             return await handlePlatform(request, db, user, route);
         }
 
-        if (sub.readOnly && method !== 'GET' && !WRITE_ALLOWED_WHEN_READ_ONLY.has(route)) {
+        // A tab still showing another restaurant (the designer switched elsewhere) must not read or write this one.
+        const expected = request.headers.get('X-Restaurant');
+        if (expected && expected !== user.restaurant.slug) {
+            return json({ error: 'Le restaurant a change dans un autre onglet', code: 'restaurant_changed' }, 409);
+        }
+
+        if (sub.readOnly && !designer && method !== 'GET' && !WRITE_ALLOWED_WHEN_READ_ONLY.has(route)) {
             return fail(402, sub.state === 'suspendu'
                 ? 'Compte suspendu : consultation seulement. Contactez Docteur PC.'
                 : 'Abonnement expire : consultation seulement. Contactez Docteur PC pour le renouveler.');
