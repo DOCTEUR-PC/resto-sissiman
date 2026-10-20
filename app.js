@@ -696,7 +696,7 @@ const App = {
         ORDER: ['gerant', 'caissier', 'serveur', 'cuisinier', 'stock', 'comptable', 'proprietaire'],
 
         async load() {
-            if (!App.can('staff.manage') && !App.can('roles.manage')) return;
+            if (!App.can('roles.manage')) return;
             try {
                 this.data = await App.api('/roles');
                 this.draft = JSON.parse(JSON.stringify(this.data.roles));
@@ -712,8 +712,8 @@ const App = {
             document.getElementById('rolesSave').style.display = editable ? '' : 'none';
             document.getElementById('rolesReset').style.display = editable ? '' : 'none';
             document.getElementById('rolesHint').textContent = editable
-                ? 'Cochez ce que chaque role peut faire. Le proprietaire a toujours tous les droits. Les changements s\'appliquent aux appareils connectes en quelques secondes.'
-                : 'Seul le proprietaire peut modifier ces permissions.';
+                ? 'Reserve a Docteur PC : cochez ce que chaque role peut faire dans ce restaurant. Le proprietaire a tous les droits sauf celui-ci. Les changements s\'appliquent aux appareils connectes en quelques secondes.'
+                : 'Seul Docteur PC peut modifier ces permissions.';
             const groups = [];
             this.data.catalog.forEach(p => {
                 let g = groups.find(x => x.name === p.group);
@@ -723,7 +723,7 @@ const App = {
             const head = `<tr><th>Permission</th>${this.ORDER.map(r => `<th class="role-col">${App.esc(App.roleLabel(r))}</th>`).join('')}</tr>`;
             const rows = groups.map(g => `<tr class="perm-group"><td colspan="${this.ORDER.length + 1}">${App.esc(g.name)}</td></tr>` +
                 g.perms.map(p => `<tr><td>${App.esc(p.label)}</td>${this.ORDER.map(r => {
-                    const locked = !editable || r === 'proprietaire' || p.ownerOnly;
+                    const locked = !editable || r === 'proprietaire' || p.designerOnly;
                     const on = (this.draft[r] || []).includes(p.key);
                     return `<td class="role-col"><input type="checkbox" ${on ? 'checked' : ''} ${locked ? 'disabled' : ''}
                         aria-label="${App.esc(App.roleLabel(r) + ' : ' + p.label)}" onchange="App.roles.toggle('${r}', '${p.key}', this.checked)"></td>`;

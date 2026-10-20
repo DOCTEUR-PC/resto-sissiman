@@ -37,12 +37,13 @@ const PERMISSIONS = [
     ['reports.view', 'Consulter les chiffres et rapports financiers', 'Gestion'],
     ['audit.view', "Consulter le journal d'activite", 'Gestion'],
     ['staff.manage', 'Gerer le personnel', 'Gestion'],
-    ['roles.manage', 'Modifier les roles et permissions', 'Gestion']
+    ['roles.manage', 'Modifier les roles et permissions (Docteur PC)', 'Gestion']
 ];
 const PERM_KEYS = new Set(PERMISSIONS.map(p => p[0]));
-const OWNER_ONLY = new Set(['roles.manage']);
+// Only the Docteur PC designer may change what each role can do; restaurant owners get everything else.
+const DESIGNER_ONLY = new Set(['roles.manage']);
 const DEFAULT_ROLE_PERMS = {
-    gerant: [...PERM_KEYS].filter(p => !OWNER_ONLY.has(p)),
+    gerant: [...PERM_KEYS].filter(p => !DESIGNER_ONLY.has(p)),
     caissier: ['page.dashboard', 'page.tables', 'page.orders', 'page.menu', 'page.caisse', 'page.cuisine',
         'orders.create', 'orders.transfer', 'orders.serve', 'orders.cancel', 'tables.status', 'payments.create', 'cash.session'],
     serveur: ['page.tables', 'page.orders', 'page.menu', 'page.cuisine',
@@ -70,8 +71,8 @@ async function roleMatrix(db, rid, fresh) {
     try { custom = row ? JSON.parse(row.value) : {}; } catch { custom = {}; }
     const matrix = {};
     for (const r of ROLES) {
-        matrix[r] = r === 'proprietaire' ? [...PERM_KEYS]
-            : Array.isArray(custom[r]) ? custom[r].filter(p => PERM_KEYS.has(p) && !OWNER_ONLY.has(p))
+        matrix[r] = r === 'proprietaire' ? [...PERM_KEYS].filter(p => !DESIGNER_ONLY.has(p))
+            : Array.isArray(custom[r]) ? custom[r].filter(p => PERM_KEYS.has(p) && !DESIGNER_ONLY.has(p))
             : DEFAULT_ROLE_PERMS[r];
     }
     matrixCache.set(rid, { at: Date.now(), matrix });
@@ -1192,7 +1193,7 @@ async function listAudit(url, db, rid) {
 
 async function getRoles(db, rid) {
     return json({
-        catalog: PERMISSIONS.map(([key, label, group]) => ({ key, label, group, ownerOnly: OWNER_ONLY.has(key) })),
+        catalog: PERMISSIONS.map(([key, label, group]) => ({ key, label, group, designerOnly: DESIGNER_ONLY.has(key) })),
         roles: await roleMatrix(db, rid, true),
         defaults: DEFAULT_ROLE_PERMS
     });
@@ -1207,7 +1208,7 @@ async function updateRoles(request, db, user) {
         if (r === 'proprietaire') continue;
         const list = Array.isArray(roles[r]) ? roles[r] : DEFAULT_ROLE_PERMS[r];
         if (list.some(p => !PERM_KEYS.has(p))) return fail(400, 'Permission inconnue');
-        custom[r] = [...new Set(list.filter(p => !OWNER_ONLY.has(p)))];
+        custom[r] = [...new Set(list.filter(p => !DESIGNER_ONLY.has(p)))];
     }
     const before = await roleMatrix(db, user.rid, true);
     await db.batch([
@@ -1541,11 +1542,11 @@ async function handleApi(request, env, url) {
             return await stockReport(url, db, user.rid);
         }
         if (route === '/roles' && method === 'GET') {
-            if (!has(user, 'staff.manage') && !has(user, 'roles.manage')) return fail(403, 'Non autorise');
+            if (!designer) return fail(403, 'Reserve a Docteur PC');
             return await getRoles(db, user.rid);
         }
         if (route === '/roles' && method === 'PUT') {
-            if (!has(user, 'roles.manage')) return fail(403, 'Seul le proprietaire peut modifier les roles');
+            if (!designer) return fail(403, 'Seul Docteur PC peut modifier les roles');
             return await updateRoles(request, db, user);
         }
         if (route === '/audit' && method === 'GET') {
