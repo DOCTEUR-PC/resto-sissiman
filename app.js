@@ -1083,7 +1083,10 @@ const App = {
                     if (document.getElementById('page-dashboard').classList.contains('active')) this.render();
                 }, 200);
             });
-            const page = document.getElementById('page-dashboard');
+            this.bindTips(document.getElementById('page-dashboard'));
+        },
+
+        bindTips(page) {
             const show = e => {
                 const el = e.target.closest('[data-tip]');
                 if (!el || !page.contains(el)) return;
@@ -3033,9 +3036,9 @@ const App = {
     },
 
     tickets: {
-        print(html) {
+        print(html, layout = 'ticket-print') {
             const area = document.getElementById('printArea');
-            area.innerHTML = `<div class="ticket-print">${html}</div>`;
+            area.innerHTML = `<div class="${layout}">${html}</div>`;
             document.body.classList.add('printing');
             const cleanup = () => {
                 document.body.classList.remove('printing');
@@ -3772,159 +3775,669 @@ const App = {
     },
 
     // RAPPORTS
+    // Each report builds one model (kpis + sections); the screen, the PDF and the Excel export all read that model.
     rapports: {
-        period: 'jour',
+        type: 'jour',
+        date: null,
+        month: null,
+        model: null,
+        loading: 0,
+        tipsBound: false,
+        KINDS: { achat: 'Achats', vente: 'Consommation (ventes)', annulation: 'Retours (annulations)', perte: 'Pertes', inventaire: "Ecarts d'inventaire" },
 
-        setPeriod(p) {
-            this.period = p;
-            document.querySelectorAll('.rapports-period .filter-btn').forEach(b => b.classList.toggle('active', b.dataset.period === p));
+        ymd(d) {
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        },
+
+        ensurePeriod() {
+            const now = new Date();
+            if (!this.date) this.date = this.ymd(now);
+            if (!this.month) this.month = this.date.slice(0, 7);
+        },
+
+        setType(type) {
+            this.type = type;
+            document.querySelectorAll('.report-tabs .stock-tab').forEach(b => {
+                const on = b.dataset.report === type;
+                b.classList.toggle('active', on);
+                b.setAttribute('aria-selected', on);
+            });
             this.render();
         },
 
-        inPeriod(iso) {
-            const now = new Date();
-            const d = new Date(iso);
-            if (this.period === 'jour') return d.toDateString() === now.toDateString();
-            if (this.period === 'semaine') return d >= new Date(now - 7 * 86400000);
-            if (this.period === 'mois') return d >= new Date(now - 30 * 86400000);
-            return true;
+        setPeriod(v) {
+            if (!v) return;
+            if (v.length === 7) { this.month = v; this.date = v + '-01'; } else { this.date = v; this.month = v.slice(0, 7); }
+            this.render();
         },
 
-        // Refunds are folded in as negative entries so every chart shows net cash.
-        getFilteredPayments() {
-            return [
-                ...App.data.payments.filter(p => this.inPeriod(p.paidAt)),
-                ...App.data.refunds.filter(r => this.inPeriod(r.at)).map(r => ({ ...r, paidAt: r.at, amount: -r.amount }))
-            ];
-        },
-
-        getFilteredOrders() {
-            const now = new Date();
-            const orders = App.data.orders;
-            if (this.period === 'jour') {
-                const today = now.toDateString();
-                return orders.filter(o => new Date(o.createdAt).toDateString() === today);
-            } else if (this.period === 'semaine') {
-                const week = new Date(now - 7 * 86400000);
-                return orders.filter(o => new Date(o.createdAt) >= week);
-            } else if (this.period === 'mois') {
-                const month = new Date(now - 30 * 86400000);
-                return orders.filter(o => new Date(o.createdAt) >= month);
+        range() {
+            this.ensurePeriod();
+            const [y, m, d] = this.date.split('-').map(Number);
+            if (this.type === 'jour') {
+                const a = new Date(y, m - 1, d);
+                return [a.getTime(), new Date(y, m - 1, d + 1).getTime()];
             }
-            return orders;
-        },
-
-        render() {
-            const payments = this.getFilteredPayments();
-            const orders = this.getFilteredOrders();
-            const total = payments.reduce((s, p) => s + p.amount, 0);
-            const paidOrders = orders.filter(o => o.status === 'payee');
-            const avgTicket = paidOrders.length > 0 ? Math.round(paidOrders.reduce((s, o) => s + o.total, 0) / paidOrders.length) : 0;
-            const covers = paidOrders.reduce((s, o) => s + (o.covers || 1), 0);
-
-            document.getElementById('rapportsSummary').innerHTML = `
-                <div class="rapport-card"><div class="label">Encaissements nets</div><div class="value gold">${App.fmt(total)}</div></div>
-                <div class="rapport-card"><div class="label">Commandes</div><div class="value">${orders.length}</div></div>
-                <div class="rapport-card"><div class="label">Ticket moyen</div><div class="value">${App.fmt(avgTicket)}</div></div>
-                <div class="rapport-card"><div class="label">Couverts</div><div class="value">${covers}</div></div>
-            `;
-
-            this.renderRevenueChart(payments);
-            this.renderTopPlats(orders);
-            this.renderPaymentMethods(payments);
-        },
-
-        renderRevenueChart(payments) {
-            const container = document.getElementById('chartRevenue');
-            if (payments.length === 0) {
-                container.innerHTML = '<p class="empty-state">Aucune donnee</p>';
-                return;
+            if (this.type === 'semaine') {
+                const day = new Date(y, m - 1, d);
+                const monday = new Date(y, m - 1, d - (day.getDay() + 6) % 7);
+                return [monday.getTime(), new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 7).getTime()];
             }
-            const byDay = {};
-            payments.forEach(p => {
-                const day = new Date(p.paidAt).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric' });
-                byDay[day] = (byDay[day] || 0) + p.amount;
-            });
-            const entries = Object.entries(byDay).slice(-7);
-            const max = Math.max(1, ...entries.map(e => e[1]));
-
-            container.innerHTML = entries.map(([day, val]) => `
-                <div class="chart-bar-row">
-                    <span class="chart-bar-label">${day}</span>
-                    <div class="chart-bar-track"><div class="chart-bar-fill" style="width:${Math.max(0, val / max * 100)}%"></div></div>
-                    <span class="chart-bar-value">${App.fmt(val)}</span>
-                </div>
-            `).join('');
+            const [my, mm] = this.month.split('-').map(Number);
+            return [new Date(my, mm - 1, 1).getTime(), new Date(my, mm, 1).getTime()];
         },
 
-        renderTopPlats(orders) {
-            const container = document.getElementById('chartTopPlats');
-            const itemCounts = {};
+        inR(iso, r) {
+            const t = new Date(iso).getTime();
+            return t >= r[0] && t < r[1];
+        },
+
+        sum(list, f) {
+            return list.reduce((s, x) => s + (f(x) || 0), 0);
+        },
+
+        dt(iso) {
+            return new Date(iso).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+        },
+
+        num(o) {
+            return '#' + String(o.number || o.orderNumber).padStart(3, '0');
+        },
+
+        tableNum(id) {
+            const t = App.data.tables.find(x => x.id === id);
+            return t ? 'T' + t.number : 'A emporter';
+        },
+
+        dishStats(orders) {
+            const agg = {};
             orders.forEach(o => o.items.forEach(it => {
-                itemCounts[it.name] = (itemCounts[it.name] || 0) + it.qty;
+                const a = agg[it.menuId || it.name] || (agg[it.menuId || it.name] = { menuId: it.menuId, name: it.name, qty: 0, amount: 0 });
+                a.qty += it.qty;
+                a.amount += App.lineTotal(it);
             }));
-            const top = Object.entries(itemCounts).sort((a, b) => b[1] - a[1]).slice(0, 10);
-            if (top.length === 0) {
-                container.innerHTML = '<p class="empty-state">Aucune donnee</p>';
-                return;
-            }
-            const max = top[0][1];
-            container.innerHTML = top.map(([name, count]) => `
-                <div class="chart-bar-row">
-                    <span class="chart-bar-label">${App.esc(name)}</span>
-                    <div class="chart-bar-track"><div class="chart-bar-fill" style="width:${max ? (count/max*100) : 0}%"></div></div>
-                    <span class="chart-bar-value">${count}</span>
-                </div>
-            `).join('');
+            return Object.values(agg).sort((a, b) => b.qty - a.qty || b.amount - a.amount);
         },
 
-        renderPaymentMethods(payments) {
-            const container = document.getElementById('chartPaiements');
-            if (payments.length === 0) {
-                container.innerHTML = '<p class="empty-state">Aucune donnee</p>';
-                return;
-            }
-            const methods = {};
-            payments.forEach(p => {
-                methods[p.method] = (methods[p.method] || 0) + p.amount;
+        sales(r) {
+            const orders = App.data.orders.filter(o => this.inR(o.createdAt, r));
+            const valid = orders.filter(o => o.status !== 'annulee');
+            const payments = App.data.payments.filter(p => this.inR(p.paidAt, r));
+            const refunds = App.data.refunds.filter(x => this.inR(x.at, r));
+            const revenue = this.sum(valid, o => o.total);
+            return {
+                orders, valid, payments, refunds, revenue,
+                cancelled: orders.filter(o => o.status === 'annulee'),
+                cash: this.sum(payments, p => p.amount) - this.sum(refunds, x => x.amount),
+                avg: valid.length ? Math.round(revenue / valid.length) : 0,
+                covers: this.sum(valid, o => o.covers || 1)
+            };
+        },
+
+        methodsTable(payments, refunds) {
+            const methods = ['especes', 'mobile', 'carte'];
+            const totalNet = this.sum(payments, p => p.amount) - this.sum(refunds, x => x.amount);
+            const rows = methods.map(m => {
+                const ps = payments.filter(p => p.method === m), rs = refunds.filter(x => x.method === m);
+                const net = this.sum(ps, p => p.amount) - this.sum(rs, x => x.amount);
+                return [App.methodLabel(m), ps.length, this.sum(ps, p => p.amount), this.sum(rs, x => x.amount), net, totalNet ? net / totalNet * 100 : 0];
             });
-            const colors = { especes: '#16a34a', mobile: '#2563eb', carte: '#d97706' };
-            const labels = { especes: 'Especes', mobile: 'Mobile Money', carte: 'Carte' };
-            const entries = Object.entries(methods).filter(([, v]) => v > 0);
-            const total = entries.reduce((s, [, v]) => s + v, 0);
-            if (total <= 0) {
-                container.innerHTML = '<p class="empty-state">Aucune donnee</p>';
-                return;
+            return {
+                columns: [{ label: 'Mode', type: 'text' }, { label: 'Paiements', type: 'int' }, { label: 'Encaisse', type: 'money' },
+                    { label: 'Rembourse', type: 'money' }, { label: 'Net', type: 'money' }, { label: 'Part', type: 'pct' }],
+                rows,
+                total: ['Total', payments.length, this.sum(payments, p => p.amount), this.sum(refunds, x => x.amount), totalNet, totalNet ? 100 : 0]
+            };
+        },
+
+        dishTable(orders, limit) {
+            const dishes = this.dishStats(orders).slice(0, limit || 1000);
+            return {
+                columns: [{ label: 'Plat', type: 'text' }, { label: 'Quantite', type: 'int' }, { label: "Chiffre d'affaires", type: 'money' }],
+                rows: dishes.map(d => [d.name, d.qty, d.amount]),
+                total: limit ? null : ['Total', this.sum(dishes, d => d.qty), this.sum(dishes, d => d.amount)]
+            };
+        },
+
+        refundsTable(refunds) {
+            return {
+                columns: [{ label: 'Date', type: 'text' }, { label: 'Commande', type: 'text' }, { label: 'Mode', type: 'text' },
+                    { label: 'Montant', type: 'money' }, { label: 'Motif', type: 'text' }, { label: 'Par', type: 'text' }],
+                rows: refunds.map(x => [this.dt(x.at), this.num(x), App.methodLabel(x.method), x.amount, x.reason, x.staffName || ''])
+            };
+        },
+
+        // ---------- modeles ----------
+
+        dayModel() {
+            const r = this.range();
+            const s = this.sales(r);
+            const byHour = {};
+            s.valid.forEach(o => {
+                const h = new Date(o.createdAt).getHours();
+                const b = byHour[h] || (byHour[h] = { n: 0, amount: 0 });
+                b.n++; b.amount += o.total;
+            });
+            const hours = Object.keys(byHour).map(Number);
+            const groups = [];
+            if (hours.length) for (let h = Math.min(8, ...hours); h <= Math.max(22, ...hours); h++) {
+                groups.push({ label: h + 'h', title: `${h}h - ${h + 1}h`, values: [byHour[h] ? byHour[h].amount : 0] });
+            }
+            const sections = [
+                { title: 'Encaissements par moyen de paiement', table: this.methodsTable(s.payments, s.refunds) },
+                {
+                    title: 'Ventes par heure', chart: groups.length ? { groups, series: [{ name: "Chiffre d'affaires" }] } : null,
+                    table: {
+                        columns: [{ label: 'Heure', type: 'text' }, { label: 'Commandes', type: 'int' }, { label: "Chiffre d'affaires", type: 'money' }],
+                        rows: hours.sort((a, b) => a - b).map(h => [`${h}h - ${h + 1}h`, byHour[h].n, byHour[h].amount])
+                    }
+                },
+                { title: 'Plats vendus', table: this.dishTable(s.valid) }
+            ];
+            if (s.cancelled.length) sections.push({
+                title: 'Commandes annulees',
+                table: {
+                    columns: [{ label: 'Commande', type: 'text' }, { label: 'Heure', type: 'text' }, { label: 'Table', type: 'text' }, { label: 'Montant', type: 'money' }],
+                    rows: s.cancelled.map(o => [this.num(o), this.dt(o.createdAt), this.tableNum(o.tableId), o.total]),
+                    total: ['Total', '', '', this.sum(s.cancelled, o => o.total)]
+                }
+            });
+            if (s.refunds.length) sections.push({ title: 'Remboursements', table: this.refundsTable(s.refunds) });
+            return {
+                title: 'Rapport journalier',
+                period: new Date(r[0]).toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }),
+                kpis: [
+                    { label: "Chiffre d'affaires", value: s.revenue, type: 'money', sub: `${s.valid.length} commande(s)` },
+                    { label: 'Encaisse net', value: s.cash, type: 'money', sub: `Remboursements ${App.fmt(this.sum(s.refunds, x => x.amount))}` },
+                    { label: 'Annulations', value: s.cancelled.length, type: 'int', sub: App.fmt(this.sum(s.cancelled, o => o.total)) },
+                    { label: 'Panier moyen', value: s.avg, type: 'money', sub: `${s.covers} couvert(s)` }
+                ],
+                sections
+            };
+        },
+
+        weekModel() {
+            const r = this.range();
+            const s = this.sales(r);
+            const prev = this.sales([r[0] - 7 * 86400000, r[0]]);
+            const days = [];
+            for (let i = 0; i < 7; i++) {
+                const a = new Date(r[0]); a.setDate(a.getDate() + i);
+                const b = new Date(a); b.setDate(b.getDate() + 1);
+                const d = this.sales([a.getTime(), b.getTime()]);
+                days.push({ date: a, label: a.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric' }), full: a.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }), ...d });
+            }
+            const delta = prev.revenue ? Math.round((s.revenue - prev.revenue) / prev.revenue * 100) : null;
+            const best = [...days].sort((a, b) => b.revenue - a.revenue)[0];
+            const end = new Date(r[1] - 1);
+            return {
+                title: 'Rapport hebdomadaire',
+                period: `Semaine du ${new Date(r[0]).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' })} au ${end.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+                kpis: [
+                    { label: "Chiffre d'affaires", value: s.revenue, type: 'money', sub: delta === null ? 'Pas de comparaison' : `${delta > 0 ? '+' : ''}${delta} % vs semaine precedente` },
+                    { label: 'Encaisse net', value: s.cash, type: 'money', sub: `${s.payments.length} paiement(s)` },
+                    { label: 'Commandes', value: s.valid.length, type: 'int', sub: `${s.cancelled.length} annulee(s)` },
+                    { label: 'Panier moyen', value: s.avg, type: 'money', sub: best && best.revenue ? `Meilleur jour : ${best.full}` : '' }
+                ],
+                sections: [
+                    {
+                        title: 'Ventes par jour',
+                        chart: { groups: days.map(d => ({ label: d.label, title: d.full, values: [d.revenue, d.cash] })), series: [{ name: "Chiffre d'affaires" }, { name: 'Encaisse' }] },
+                        table: {
+                            columns: [{ label: 'Jour', type: 'text' }, { label: 'Commandes', type: 'int' }, { label: "Chiffre d'affaires", type: 'money' },
+                                { label: 'Encaisse net', type: 'money' }, { label: 'Panier moyen', type: 'money' }],
+                            rows: days.map(d => [d.full, d.valid.length, d.revenue, d.cash, d.avg]),
+                            total: ['Total', s.valid.length, s.revenue, s.cash, s.avg]
+                        }
+                    },
+                    {
+                        title: 'Jours les plus rentables',
+                        table: {
+                            columns: [{ label: 'Rang', type: 'int' }, { label: 'Jour', type: 'text' }, { label: "Chiffre d'affaires", type: 'money' }, { label: 'Part', type: 'pct' }],
+                            rows: [...days].sort((a, b) => b.revenue - a.revenue).map((d, i) => [i + 1, d.full, d.revenue, s.revenue ? d.revenue / s.revenue * 100 : 0])
+                        }
+                    },
+                    { title: 'Plats les plus vendus', table: this.dishTable(s.valid, 15) }
+                ]
+            };
+        },
+
+        stockCache: {},
+
+        // Cached for a minute: the page re-renders on every sync and must not refetch each time.
+        async stockData(r) {
+            const key = r.join('-');
+            const c = this.stockCache[key];
+            if (c && Date.now() - c.at < 60000) return c.data;
+            try {
+                const data = await App.api(`/reports/stock?from=${r[0]}&to=${r[1]}`);
+                this.stockCache[key] = { at: Date.now(), data };
+                return data;
+            } catch (e) {
+                return c ? c.data : null;
+            }
+        },
+
+        async monthModel() {
+            const r = this.range();
+            const s = this.sales(r);
+            const st = await this.stockData(r);
+            const kind = k => st ? this.sum(st.byKind.filter(x => x.kind === k), x => x.value) : 0;
+            const materialCost = st ? -(kind('vente') + kind('annulation')) || 0 : null;
+            const losses = st ? -kind('perte') : null;
+            const invAdj = st ? kind('inventaire') : null;
+            const margin = materialCost === null ? null : s.revenue - materialCost;
+            const purchases = App.data.purchases.filter(p => p.date.slice(0, 7) === this.month);
+            const spent = this.sum(purchases, p => p.total);
+
+            const days = [];
+            const cursor = new Date(r[0]);
+            while (cursor.getTime() < r[1]) {
+                const b = new Date(cursor); b.setDate(b.getDate() + 1);
+                const d = this.sales([cursor.getTime(), b.getTime()]);
+                days.push({ label: String(cursor.getDate()), title: cursor.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }), ...d });
+                cursor.setDate(cursor.getDate() + 1);
             }
 
-            let cumul = 0;
-            const segments = entries.map(([method, val]) => {
-                const pct = (val / total) * 100;
-                const start = cumul;
-                cumul += pct;
-                return { method, val, pct, start, color: colors[method] || '#9d97a8' };
+            const recipeCost = m => App.menu.recipeCostOf(m && m.recipe);
+            const dishes = this.dishStats(s.valid).map(d => {
+                const m = App.data.menuItems.find(x => x.id === d.menuId);
+                const cost = m && m.recipe ? Math.round(recipeCost(m) * d.qty) : null;
+                return [d.name, d.qty, d.amount, cost, cost === null ? null : d.amount - cost, cost === null || !d.amount ? null : (d.amount - cost) / d.amount * 100];
             });
+            const bySupplier = {};
+            purchases.forEach(p => { const b = bySupplier[p.supplier] || (bySupplier[p.supplier] = { n: 0, amount: 0 }); b.n++; b.amount += p.total; });
 
-            const svgParts = segments.map(s => {
-                const r = 60;
-                const circ = 2 * Math.PI * r;
-                const dashLen = (s.pct / 100) * circ;
-                const dashOff = -(s.start / 100) * circ;
-                return `<circle cx="80" cy="80" r="${r}" fill="none" stroke="${s.color}" stroke-width="20" stroke-dasharray="${dashLen} ${circ - dashLen}" stroke-dashoffset="${dashOff}" />`;
-            }).join('');
+            const monthLabel = new Date(r[0]).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+            return {
+                title: 'Rapport mensuel',
+                period: monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1),
+                kpis: [
+                    { label: "Chiffre d'affaires", value: s.revenue, type: 'money', sub: `${s.valid.length} commande(s) · panier ${App.fmt(s.avg)}` },
+                    { label: 'Encaisse net', value: s.cash, type: 'money', sub: `Remboursements ${App.fmt(this.sum(s.refunds, x => x.amount))}` },
+                    { label: 'Cout matiere estime', value: materialCost, type: 'money', sub: materialCost === null ? 'Indisponible hors connexion' : 'Ingredients consommes par les ventes' },
+                    { label: 'Marge brute estimee', value: margin, type: 'money', sub: margin === null || !s.revenue ? '' : `${(margin / s.revenue * 100).toFixed(1).replace('.', ',')} % du chiffre d'affaires` },
+                    { label: 'Achats fournisseurs', value: spent, type: 'money', sub: `${purchases.length} achat(s)` },
+                    { label: 'Pertes', value: losses, type: 'money', sub: invAdj === null ? '' : `Ecarts d'inventaire ${invAdj > 0 ? '+' : ''}${App.fmt(Math.round(invAdj))}` }
+                ],
+                sections: [
+                    {
+                        title: 'Compte de resultat simplifie',
+                        note: 'Le cout matiere est calcule a partir des recettes des plats et du cout moyen des ingredients au moment de chaque vente.',
+                        table: {
+                            columns: [{ label: 'Poste', type: 'text' }, { label: 'Montant', type: 'money' }],
+                            rows: [
+                                ["Chiffre d'affaires", s.revenue],
+                                ['Cout matiere consomme', materialCost === null ? null : -materialCost],
+                                ['Marge brute', margin],
+                                ['Pertes declarees', losses === null ? null : -losses],
+                                ["Ecarts d'inventaire", invAdj],
+                                ['Marge apres pertes et ecarts', margin === null ? null : margin - losses + invAdj]
+                            ]
+                        }
+                    },
+                    {
+                        title: 'Evolution journaliere',
+                        chart: { groups: days.map(d => ({ label: d.label, title: d.title, values: [d.revenue] })), series: [{ name: "Chiffre d'affaires" }] },
+                        table: {
+                            columns: [{ label: 'Jour', type: 'text' }, { label: 'Commandes', type: 'int' }, { label: "Chiffre d'affaires", type: 'money' }, { label: 'Encaisse net', type: 'money' }],
+                            rows: days.filter(d => d.orders.length || d.payments.length).map(d => [d.title, d.valid.length, d.revenue, d.cash]),
+                            total: ['Total', s.valid.length, s.revenue, s.cash]
+                        }
+                    },
+                    {
+                        title: 'Marge par plat',
+                        note: 'Estimation avec les recettes et les couts moyens actuels. Les plats sans recette n\'ont pas de cout.',
+                        table: {
+                            columns: [{ label: 'Plat', type: 'text' }, { label: 'Quantite', type: 'int' }, { label: "Chiffre d'affaires", type: 'money' },
+                                { label: 'Cout estime', type: 'money' }, { label: 'Marge', type: 'money' }, { label: 'Taux', type: 'pct' }],
+                            rows: dishes
+                        }
+                    },
+                    {
+                        title: 'Depenses par fournisseur',
+                        table: {
+                            columns: [{ label: 'Fournisseur', type: 'text' }, { label: 'Achats', type: 'int' }, { label: 'Montant', type: 'money' }],
+                            rows: Object.entries(bySupplier).sort((a, b) => b[1].amount - a[1].amount).map(([k, v]) => [k, v.n, v.amount]),
+                            total: ['Total', purchases.length, spent]
+                        }
+                    }
+                ]
+            };
+        },
 
-            container.innerHTML = `<div class="chart-donut">
-                <svg class="donut-ring" viewBox="0 0 160 160">${svgParts}</svg>
-                <div class="donut-labels">
-                    ${entries.map(([method, val]) => `
-                        <div class="donut-label-row">
-                            <span class="donut-label-dot" style="background:${colors[method] || '#9d97a8'}"></span>
-                            <span class="donut-label-text">${labels[method] || method}</span>
-                            <span class="donut-label-value">${App.fmt(val)}</span>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>`;
+        async stockModel() {
+            const r = this.range();
+            const st = await this.stockData(r);
+            const ings = [...App.data.ingredients].sort((a, b) => a.name.localeCompare(b.name));
+            const labels = { ok: 'OK', bas: 'Stock bas', rupture: 'Rupture' };
+            const value = this.sum(ings, i => Math.max(0, i.stock || 0) * (i.avgCost || 0));
+            const purchases = App.data.purchases.filter(p => p.date.slice(0, 7) === this.month);
+            const kindVal = k => st ? this.sum(st.byKind.filter(x => x.kind === k), x => x.value) : null;
+            const monthLabel = new Date(r[0]).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+            const sections = [{
+                title: 'Etat du stock (aujourd\'hui)',
+                table: {
+                    columns: [{ label: 'Ingredient', type: 'text' }, { label: 'Stock', type: 'qty' }, { label: 'Unite', type: 'text' }, { label: 'Seuil', type: 'qty' },
+                        { label: 'Etat', type: 'text' }, { label: 'Cout moyen', type: 'money' }, { label: 'Valeur', type: 'money' }],
+                    rows: ings.map(i => [i.name, i.stock || 0, i.unit, i.threshold || 0, labels[App.stocks.level(i)], Math.round(i.avgCost || 0), Math.round(Math.max(0, i.stock || 0) * (i.avgCost || 0))]),
+                    total: ['Total', '', '', '', '', '', Math.round(value)]
+                }
+            }];
+            if (st) {
+                sections.push({
+                    title: 'Mouvements du mois',
+                    table: {
+                        columns: [{ label: 'Type', type: 'text' }, { label: 'Mouvements', type: 'int' }, { label: 'Valeur', type: 'money' }],
+                        rows: st.byKind.map(k => [this.KINDS[k.kind] || k.kind, k.n, Math.round(k.value)])
+                    }
+                });
+                sections.push({
+                    title: 'Consommation et pertes par ingredient',
+                    table: {
+                        columns: [{ label: 'Ingredient', type: 'text' }, { label: 'Consomme', type: 'qty' }, { label: 'Unite', type: 'text' },
+                            { label: 'Valeur consommee', type: 'money' }, { label: 'Perdu', type: 'qty' }, { label: 'Valeur perdue', type: 'money' }],
+                        rows: st.byIngredient.filter(x => x.name).sort((a, b) => a.consumedValue - b.consumedValue)
+                            .map(x => [x.name, -x.consumed, x.unit, Math.round(-x.consumedValue), -x.lost, Math.round(-x.lostValue)])
+                    }
+                });
+                if (st.losses.length) sections.push({
+                    title: 'Pertes declarees',
+                    table: {
+                        columns: [{ label: 'Date', type: 'text' }, { label: 'Ingredient', type: 'text' }, { label: 'Quantite', type: 'qty' },
+                            { label: 'Unite', type: 'text' }, { label: 'Valeur', type: 'money' }, { label: 'Motif', type: 'text' }, { label: 'Par', type: 'text' }],
+                        rows: st.losses.map(l => [this.dt(l.at), l.name || '?', -l.qty, l.unit || '', Math.round(-l.value), l.note || '', l.staff_name || ''])
+                    }
+                });
+            }
+            sections.push({
+                title: 'Achats du mois',
+                table: {
+                    columns: [{ label: 'Date', type: 'text' }, { label: 'Fournisseur', type: 'text' }, { label: 'Articles', type: 'text' }, { label: 'Montant', type: 'money' }],
+                    rows: purchases.sort((a, b) => a.date.localeCompare(b.date)).map(p => [
+                        new Date(p.date + 'T12:00:00').toLocaleDateString('fr-FR'), p.supplier,
+                        p.lines.map(l => `${App.stocks.qty(l.qty)} ${l.unit} ${l.name}`).join(', '), p.total]),
+                    total: ['Total', '', '', this.sum(purchases, p => p.total)]
+                }
+            });
+            const low = ings.filter(i => App.stocks.level(i) === 'bas').length;
+            const out = ings.filter(i => App.stocks.level(i) === 'rupture').length;
+            return {
+                title: 'Rapport des stocks',
+                period: monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1),
+                kpis: [
+                    { label: 'Valeur du stock', value: Math.round(value), type: 'money', sub: `${ings.length} ingredient(s), a ce jour` },
+                    { label: 'Ruptures / stock bas', value: out + low, type: 'int', sub: `${out} rupture(s), ${low} stock(s) bas` },
+                    { label: 'Achats du mois', value: this.sum(purchases, p => p.total), type: 'money', sub: `${purchases.length} achat(s)` },
+                    { label: 'Pertes du mois', value: st ? Math.round(-kindVal('perte')) : null, type: 'money', sub: st ? `Ecarts d'inventaire ${App.fmt(Math.round(kindVal('inventaire')))}` : 'Indisponible hors connexion' }
+                ],
+                sections
+            };
+        },
+
+        cashModel() {
+            const r = this.range();
+            const sessions = App.data.cashSessions.filter(x => this.inR(x.openedAt, r)).sort((a, b) => a.openedAt.localeCompare(b.openedAt));
+            const closed = sessions.filter(x => x.status === 'fermee');
+            const payments = App.data.payments.filter(p => this.inR(p.paidAt, r));
+            const refunds = App.data.refunds.filter(x => this.inR(x.at, r));
+            const gaps = closed.filter(x => x.diff);
+            const byStaff = {};
+            payments.forEach(p => { const b = byStaff[p.staffName || '?'] || (byStaff[p.staffName || '?'] = { n: 0, amount: 0 }); b.n++; b.amount += p.amount; });
+            const monthLabel = new Date(r[0]).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+            return {
+                title: 'Rapport de caisse',
+                period: monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1),
+                kpis: [
+                    { label: 'Sessions de caisse', value: sessions.length, type: 'int', sub: `${sessions.length - closed.length} encore ouverte(s)` },
+                    { label: 'Encaisse', value: this.sum(payments, p => p.amount), type: 'money', sub: `${payments.length} paiement(s)` },
+                    { label: 'Remboursements', value: this.sum(refunds, x => x.amount), type: 'money', sub: `${refunds.length} remboursement(s)` },
+                    { label: 'Ecart cumule', value: this.sum(closed, x => x.diff), type: 'money', sub: `${gaps.length} session(s) avec ecart` }
+                ],
+                sections: [
+                    {
+                        title: 'Sessions de caisse',
+                        table: {
+                            columns: [{ label: 'Caissier', type: 'text' }, { label: 'Ouverture', type: 'text' }, { label: 'Cloture', type: 'text' },
+                                { label: 'Fonds', type: 'money' }, { label: 'Attendu', type: 'money' }, { label: 'Compte', type: 'money' },
+                                { label: 'Ecart', type: 'money' }, { label: 'Commentaire', type: 'text' }],
+                            rows: sessions.map(x => [x.staffName, this.dt(x.openedAt), x.closedAt ? this.dt(x.closedAt) : 'Ouverte',
+                                x.openingFloat, x.status === 'fermee' ? x.expectedCash : App.cash.expected(x), x.status === 'fermee' ? x.countedCash : null,
+                                x.status === 'fermee' ? x.diff : null, x.note || '']),
+                            total: ['Total', '', '', '', this.sum(closed, x => x.expectedCash), this.sum(closed, x => x.countedCash), this.sum(closed, x => x.diff), '']
+                        }
+                    },
+                    { title: 'Encaissements par moyen de paiement', table: this.methodsTable(payments, refunds) },
+                    {
+                        title: 'Encaissements par caissier',
+                        table: {
+                            columns: [{ label: 'Caissier', type: 'text' }, { label: 'Paiements', type: 'int' }, { label: 'Montant', type: 'money' }],
+                            rows: Object.entries(byStaff).sort((a, b) => b[1].amount - a[1].amount).map(([k, v]) => [k, v.n, v.amount])
+                        }
+                    },
+                    { title: 'Remboursements', table: this.refundsTable(refunds) }
+                ]
+            };
+        },
+
+        async build() {
+            if (this.type === 'jour') return this.dayModel();
+            if (this.type === 'semaine') return this.weekModel();
+            if (this.type === 'mois') return this.monthModel();
+            if (this.type === 'stocks') return this.stockModel();
+            return this.cashModel();
+        },
+
+        // ---------- rendu ----------
+
+        fmtCell(v, type) {
+            if (v === '') return '';
+            if (v === null || v === undefined) return type === 'text' ? '' : '—';
+            if (type === 'money') return App.fmt(Math.round(v) || 0);
+            if (type === 'int') return (Math.round(v) || 0).toLocaleString('fr-FR');
+            if (type === 'qty') return App.stocks.qty(v);
+            if (type === 'pct') return `${v.toFixed(1).replace('.', ',')} %`;
+            return String(v);
+        },
+
+        tableHtml(t) {
+            if (!t.rows.length) return '<p class="report-empty">Aucune donnee sur la periode</p>';
+            const cls = c => c.type === 'text' ? '' : ' class="num"';
+            return `<div class="table-scroll"><table class="data-table report-table">
+                <thead><tr>${t.columns.map(c => `<th${cls(c)}>${App.esc(c.label)}</th>`).join('')}</tr></thead>
+                <tbody>${t.rows.map(r => `<tr>${r.map((v, i) => `<td${cls(t.columns[i])}>${App.esc(this.fmtCell(v, t.columns[i].type))}</td>`).join('')}</tr>`).join('')}</tbody>
+                ${t.total ? `<tfoot><tr>${t.total.map((v, i) => `<td${cls(t.columns[i])}><strong>${App.esc(i === 0 ? v : this.fmtCell(v, t.columns[i].type))}</strong></td>`).join('')}</tr></tfoot>` : ''}
+            </table></div>`;
+        },
+
+        kpiHtml(k) {
+            return `<div class="kpi"><span class="kpi-label">${App.esc(k.label)}</span><span class="kpi-value">${App.esc(this.fmtCell(k.value, k.type))}</span>${k.sub ? `<span class="kpi-sub">${App.esc(k.sub)}</span>` : ''}</div>`;
+        },
+
+        async render() {
+            const view = document.getElementById('reportView');
+            if (!view || !document.getElementById('page-rapports').classList.contains('active')) return;
+            this.ensurePeriod();
+            const monthly = this.type !== 'jour' && this.type !== 'semaine';
+            document.getElementById('reportDate').hidden = monthly;
+            document.getElementById('reportMonth').hidden = !monthly;
+            document.getElementById('reportDate').value = this.date;
+            document.getElementById('reportMonth').value = this.month;
+            document.getElementById('reportPeriodLabel').textContent = this.type === 'jour' ? 'Jour' : this.type === 'semaine' ? 'Semaine du' : 'Mois';
+            if (!this.tipsBound) { App.dashboard.bindTips(document.getElementById('page-rapports')); this.tipsBound = true; }
+            const ticket = ++this.loading;
+            view.classList.add('loading');
+            const model = await this.build();
+            if (ticket !== this.loading) return;
+            view.classList.remove('loading');
+            const signature = JSON.stringify(model) + view.clientWidth;
+            if (signature === this.signature && view.querySelector('.report-head')) return;
+            this.signature = signature;
+            this.model = model;
+            view.innerHTML = `<div class="report-head"><h2>${App.esc(model.title)}</h2><span>${App.esc(model.period)}</span></div>
+                <div class="kpi-grid report-kpis">${model.kpis.map(k => this.kpiHtml(k)).join('')}</div>
+                ${model.sections.map((s, i) => `<section class="panel report-section">
+                    <div class="chart-head"><div><h3>${App.esc(s.title)}</h3>${s.note ? `<p class="chart-sub">${App.esc(s.note)}</p>` : ''}</div></div>
+                    ${s.chart ? `${s.chart.series.length > 1 ? `<div class="chart-legend">${s.chart.series.map((x, j) => `<span class="legend-item"><span class="legend-swatch s${j + 1}"></span>${App.esc(x.name)}</span>`).join('')}</div>` : ''}<div class="report-chart" data-i="${i}"></div>` : ''}
+                    ${this.tableHtml(s.table)}
+                </section>`).join('')}`;
+            view.querySelectorAll('.report-chart').forEach(el => {
+                const s = model.sections[el.dataset.i];
+                el.innerHTML = App.dashboard.columns(el, s.chart);
+            });
+        },
+
+        // ---------- exports ----------
+
+        fileName(ext) {
+            const p = this.type === 'jour' || this.type === 'semaine' ? this.date : this.month;
+            return `sissiman-rapport-${this.type}-${p}.${ext}`;
+        },
+
+        async exportPdf() {
+            const m = this.model || await this.build();
+            const charts = m.sections.map(s => s.chart ? App.dashboard.columns({ clientWidth: 680 }, s.chart) : '');
+            App.tickets.print(`<header class="rp-head">
+                    <div><div class="rp-name">Restaurant Sissiman</div><div>Bobo-Dioulasso, Burkina Faso</div></div>
+                    <div class="rp-title"><strong>${App.esc(m.title)}</strong><span>${App.esc(m.period)}</span></div>
+                </header>
+                <div class="rp-kpis">${m.kpis.map(k => `<div><span>${App.esc(k.label)}</span><strong>${App.esc(this.fmtCell(k.value, k.type))}</strong>${k.sub ? `<small>${App.esc(k.sub)}</small>` : ''}</div>`).join('')}</div>
+                ${m.sections.map((s, i) => `<section class="rp-section"><h3>${App.esc(s.title)}</h3>${s.note ? `<p class="rp-note">${App.esc(s.note)}</p>` : ''}${charts[i]}${this.tableHtml(s.table)}</section>`).join('')}
+                <footer class="rp-foot">Edite le ${App.esc(new Date().toLocaleString('fr-FR'))} par ${App.esc(App.currentUser ? App.currentUser.name : '')}</footer>`, 'report-print');
+        },
+
+        async exportExcel() {
+            const m = this.model || await this.build();
+            const cell = (v, type) => v === null || v === undefined ? '' : type === 'pct' ? Math.round(v * 10) / 10 : type === 'money' ? Math.round(v) : v;
+            const sheets = [{
+                name: 'Resume',
+                widths: [34, 20, 50],
+                rows: [
+                    [{ v: 'Restaurant Sissiman - ' + m.title, bold: true }],
+                    [m.period],
+                    [],
+                    [{ v: 'Indicateur', bold: true }, { v: 'Valeur', bold: true }, { v: 'Detail', bold: true }],
+                    ...m.kpis.map(k => [k.label, cell(k.value, k.type), k.sub || ''])
+                ]
+            }];
+            m.sections.forEach(s => {
+                const t = s.table;
+                sheets.push({
+                    name: s.title,
+                    widths: t.columns.map(c => c.type === 'text' ? 28 : 16),
+                    rows: [
+                        [{ v: s.title, bold: true }],
+                        ...(s.note ? [[s.note]] : []),
+                        [],
+                        t.columns.map(c => ({ v: c.label + (c.type === 'money' ? ' (FCFA)' : c.type === 'pct' ? ' (%)' : ''), bold: true })),
+                        ...t.rows.map(r => r.map((v, i) => cell(v, t.columns[i].type))),
+                        ...(t.total ? [t.total.map((v, i) => ({ v: i === 0 ? v : cell(v, t.columns[i].type), bold: true }))] : [])
+                    ]
+                });
+            });
+            const blob = App.xlsx.build(sheets);
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = this.fileName('xlsx');
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+            App.toast('Fichier Excel telecharge');
+        }
+    },
+
+    // Minimal XLSX writer (stored ZIP + SpreadsheetML), so exports need no third-party library or network access.
+    xlsx: {
+        crcTable: null,
+
+        crc32(bytes) {
+            if (!this.crcTable) {
+                this.crcTable = new Uint32Array(256);
+                for (let n = 0; n < 256; n++) {
+                    let c = n;
+                    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+                    this.crcTable[n] = c >>> 0;
+                }
+            }
+            let crc = 0xFFFFFFFF;
+            for (let i = 0; i < bytes.length; i++) crc = this.crcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+            return (crc ^ 0xFFFFFFFF) >>> 0;
+        },
+
+        zip(files) {
+            const enc = new TextEncoder();
+            const parts = [], central = [];
+            let offset = 0;
+            const u16 = n => [n & 0xFF, (n >>> 8) & 0xFF];
+            const u32 = n => [n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF];
+            for (const f of files) {
+                const name = enc.encode(f.name);
+                const data = enc.encode(f.data);
+                const crc = this.crc32(data);
+                const head = [0x50, 0x4B, 0x03, 0x04, ...u16(20), ...u16(0x0800), ...u16(0), ...u16(0), ...u16(0x21),
+                    ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0)];
+                parts.push(new Uint8Array(head), name, data);
+                central.push(new Uint8Array([0x50, 0x4B, 0x01, 0x02, ...u16(20), ...u16(20), ...u16(0x0800), ...u16(0), ...u16(0), ...u16(0x21),
+                    ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+                    ...u32(0), ...u32(offset)]), name);
+                offset += head.length + name.length + data.length;
+            }
+            const centralSize = central.reduce((s, p) => s + p.length, 0);
+            const end = new Uint8Array([0x50, 0x4B, 0x05, 0x06, ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length),
+                ...u32(centralSize), ...u32(offset), ...u16(0)]);
+            return new Blob([...parts, ...central, end], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        },
+
+        esc(s) {
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+                .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+        },
+
+        col(i) {
+            let s = '';
+            for (i++; i > 0; i = Math.floor((i - 1) / 26)) s = String.fromCharCode(65 + (i - 1) % 26) + s;
+            return s;
+        },
+
+        sheetXml(sheet) {
+            const rows = sheet.rows.map((row, r) => `<row r="${r + 1}">${row.map((c, i) => {
+                const cell = c && typeof c === 'object' ? c : { v: c };
+                const ref = this.col(i) + (r + 1);
+                if (cell.v === '' || cell.v === null || cell.v === undefined) return '';
+                if (typeof cell.v === 'number' && Number.isFinite(cell.v)) {
+                    const style = cell.bold ? 4 : Number.isInteger(cell.v) ? 2 : 3;
+                    return `<c r="${ref}" s="${style}"><v>${cell.v}</v></c>`;
+                }
+                return `<c r="${ref}" t="inlineStr"${cell.bold ? ' s="1"' : ''}><is><t xml:space="preserve">${this.esc(cell.v)}</t></is></c>`;
+            }).join('')}</row>`).join('');
+            const cols = (sheet.widths || []).map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`).join('');
+            return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${cols ? `<cols>${cols}</cols>` : ''}<sheetData>${rows}</sheetData></worksheet>`;
+        },
+
+        build(sheets) {
+            const used = new Set();
+            const names = sheets.map(s => {
+                let base = s.name.replace(/[\[\]:*?\/\\]/g, ' ').slice(0, 28).trim() || 'Feuille';
+                let name = base, n = 2;
+                while (used.has(name.toLowerCase())) name = `${base.slice(0, 26)} ${n++}`;
+                used.add(name.toLowerCase());
+                return name;
+            });
+            const files = [
+                { name: '[Content_Types].xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((s, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>` },
+                { name: '_rels/.rels', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+                { name: 'xl/workbook.xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${names.map((n, i) => `<sheet name="${this.esc(n)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets></workbook>` },
+                { name: 'xl/_rels/workbook.xml.rels', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((s, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` },
+                { name: 'xl/styles.xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="3" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>` },
+                ...sheets.map((s, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: this.sheetXml(s) }))
+            ];
+            return this.zip(files);
         }
     },
 

@@ -618,7 +618,9 @@ async function orderStockStmts(db, c, ctx, user, now) {
     const out = [];
     for (const [ingredientId, qty] of deltas) {
         if (Math.abs(qty) < 1e-9) continue;
-        out.push(...stockMoveStmts(db, { ingredientId, qty, kind, ref: c.id, user, now }));
+        // Cost frozen at the time of the sale so later purchases do not rewrite past margins.
+        const ing = await ctx.lookup('ingredients', ingredientId);
+        out.push(...stockMoveStmts(db, { ingredientId, qty, kind, ref: c.id, unitCost: ing ? ing.avgCost || 0 : 0, user, now }));
     }
     return out;
 }
@@ -745,6 +747,28 @@ async function listMoves(url, db) {
     const { results } = await db.prepare(`SELECT at, qty, kind, ref, unit_cost, staff_name, note FROM stock_moves
         WHERE ingredient_id = ? ORDER BY id DESC LIMIT ?`).bind(id, limit).all();
     return json({ moves: results });
+}
+
+// Stock movements valued at their recorded cost (older sale moves without one fall back to the current average cost).
+async function stockReport(url, db) {
+    const from = parseInt(url.searchParams.get('from'), 10) || 0;
+    const to = parseInt(url.searchParams.get('to'), 10) || Date.now();
+    const value = 'm.qty * COALESCE(m.unit_cost, json_extract(r.data, \'$.avgCost\'), 0)';
+    const join = "LEFT JOIN records r ON r.collection = 'ingredients' AND r.id = m.ingredient_id";
+    const [byKind, byIngredient, losses] = await db.batch([
+        db.prepare(`SELECT m.kind, COUNT(*) AS n, SUM(${value}) AS value FROM stock_moves m ${join}
+            WHERE m.at >= ? AND m.at < ? GROUP BY m.kind`).bind(from, to),
+        db.prepare(`SELECT m.ingredient_id AS id, json_extract(r.data, '$.name') AS name, json_extract(r.data, '$.unit') AS unit,
+                SUM(CASE WHEN m.kind IN ('vente', 'annulation') THEN m.qty ELSE 0 END) AS consumed,
+                SUM(CASE WHEN m.kind IN ('vente', 'annulation') THEN ${value} ELSE 0 END) AS consumedValue,
+                SUM(CASE WHEN m.kind = 'perte' THEN m.qty ELSE 0 END) AS lost,
+                SUM(CASE WHEN m.kind = 'perte' THEN ${value} ELSE 0 END) AS lostValue,
+                SUM(CASE WHEN m.kind = 'inventaire' THEN ${value} ELSE 0 END) AS inventoryValue
+            FROM stock_moves m ${join} WHERE m.at >= ? AND m.at < ? GROUP BY m.ingredient_id`).bind(from, to),
+        db.prepare(`SELECT m.at, m.qty, m.note, m.staff_name, json_extract(r.data, '$.name') AS name, json_extract(r.data, '$.unit') AS unit,
+                ${value} AS value FROM stock_moves m ${join} WHERE m.kind = 'perte' AND m.at >= ? AND m.at < ? ORDER BY m.at DESC LIMIT 200`).bind(from, to)
+    ]);
+    return json({ byKind: byKind.results, byIngredient: byIngredient.results, losses: losses.results });
 }
 
 function summarize(collection, rec) {
@@ -1164,6 +1188,10 @@ async function handleApi(request, env, url) {
             return await listMoves(url, db);
         }
 
+        if (route === '/reports/stock' && method === 'GET') {
+            if (!has(user, 'reports.view') && !has(user, 'stock.view')) return fail(403, 'Non autorise');
+            return await stockReport(url, db);
+        }
         if (route === '/roles' && method === 'GET') {
             if (!has(user, 'staff.manage') && !has(user, 'roles.manage')) return fail(403, 'Non autorise');
             return await getRoles(db);

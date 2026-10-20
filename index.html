@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=20261017i">
+    <link rel="stylesheet" href="styles.css?v=20261020a">
 </head>
 <body>
     <!-- LOGIN -->
@@ -192,7 +192,6 @@
                     <p class="empty-state">Aucune commande aujourd'hui</p>
                 </div>
             </div>
-            <div class="viz-tip" id="vizTip" role="tooltip" hidden></div>
         </section>
 
         <!-- TABLES -->
@@ -671,27 +670,25 @@
 
         <!-- RAPPORTS -->
         <section class="page" id="page-rapports">
-            <div class="rapports-period">
-                <button class="filter-btn active" data-period="jour" onclick="App.rapports.setPeriod('jour')">Aujourd'hui</button>
-                <button class="filter-btn" data-period="semaine" onclick="App.rapports.setPeriod('semaine')">7 jours</button>
-                <button class="filter-btn" data-period="mois" onclick="App.rapports.setPeriod('mois')">30 jours</button>
-                <button class="filter-btn" data-period="tout" onclick="App.rapports.setPeriod('tout')">Tout</button>
-            </div>
-            <div class="rapports-summary" id="rapportsSummary"></div>
-            <div class="rapports-charts">
-                <div class="panel">
-                    <h3 class="panel-title">Chiffre d'affaires</h3>
-                    <div class="chart-container" id="chartRevenue"></div>
+            <div class="report-bar">
+                <div class="stock-tabs report-tabs" role="tablist">
+                    <button class="stock-tab active" role="tab" data-report="jour" onclick="App.rapports.setType('jour')">Journalier</button>
+                    <button class="stock-tab" role="tab" data-report="semaine" onclick="App.rapports.setType('semaine')">Hebdomadaire</button>
+                    <button class="stock-tab" role="tab" data-report="mois" onclick="App.rapports.setType('mois')">Mensuel</button>
+                    <button class="stock-tab" role="tab" data-report="stocks" onclick="App.rapports.setType('stocks')">Stocks</button>
+                    <button class="stock-tab" role="tab" data-report="caisse" onclick="App.rapports.setType('caisse')">Caisse</button>
                 </div>
-                <div class="panel">
-                    <h3 class="panel-title">Top 10 des plats</h3>
-                    <div class="chart-container" id="chartTopPlats"></div>
+                <div class="report-controls">
+                    <label class="report-period">
+                        <span id="reportPeriodLabel">Jour</span>
+                        <input type="date" id="reportDate" onchange="App.rapports.setPeriod(this.value)">
+                        <input type="month" id="reportMonth" onchange="App.rapports.setPeriod(this.value)" hidden>
+                    </label>
+                    <button class="btn btn-secondary" onclick="App.rapports.exportPdf()">Exporter PDF</button>
+                    <button class="btn btn-primary" onclick="App.rapports.exportExcel()">Exporter Excel</button>
                 </div>
             </div>
-            <div class="panel" style="margin-top:1.5rem">
-                <h3 class="panel-title">Modes de paiement</h3>
-                <div class="chart-container" id="chartPaiements"></div>
-            </div>
+            <div class="report" id="reportView"><p class="empty-state">Chargement...</p></div>
         </section>
 
         <!-- PERSONNEL -->
@@ -850,8 +847,9 @@
         </div>
     </div>
 
+    <div class="viz-tip" id="vizTip" role="tooltip" hidden></div>
     <div id="printArea" aria-hidden="true"></div>
 
-    <script src="app.js?v=20261017i"></script>
+    <script src="app.js?v=20261020a"></script>
 </body>
 </html>
