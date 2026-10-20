@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Menu · Restaurant Sissiman</title>
+    <meta name="description" content="Le menu du Restaurant Sissiman a Bobo-Dioulasso : plats, boissons et prix en FCFA.">
+    <meta name="theme-color" content="#1a1520">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #f6f3ee; --surface: #ffffff; --text: #1a1520; --text-2: #5e5868; --muted: #8e8899;
+            --border: #e6e0d6; --gold: #a57d2c; --gold-soft: rgba(184, 146, 62, 0.12); --off: #b3392f;
+            color-scheme: light;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root { --bg: #121218; --surface: #1d1d26; --text: #f0ece4; --text-2: #b3aebb; --muted: #847f8f;
+                --border: #2c2c38; --gold: #d9b261; --gold-soft: rgba(217, 178, 97, 0.12); --off: #ef7b70; color-scheme: dark; }
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); line-height: 1.45; }
+        .hero { background: #1a1520; color: #f5efe4; padding: 1.6rem 1rem 1.3rem; text-align: center; }
+        .hero h1 { font-family: 'Playfair Display', Georgia, serif; font-size: 1.8rem; }
+        .hero h1 span { color: #d9b261; }
+        .hero p { color: #c9c1b5; font-size: 0.85rem; margin-top: 0.2rem; }
+        .table-chip { display: inline-block; margin-top: 0.7rem; padding: 0.25rem 0.8rem; border-radius: 999px; background: rgba(217, 178, 97, 0.18); color: #f1d595; font-weight: 600; font-size: 0.85rem; }
+        .bar { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--border); padding: 0.6rem 1rem 0.5rem; }
+        .search { width: 100%; padding: 0.65rem 0.9rem; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 0.95rem; }
+        .search:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+        .cats { display: flex; gap: 0.4rem; overflow-x: auto; padding: 0.55rem 0 0.1rem; scrollbar-width: none; }
+        .cats::-webkit-scrollbar { display: none; }
+        .cat { flex-shrink: 0; padding: 0.45rem 0.85rem; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 0.85rem; cursor: pointer; white-space: nowrap; }
+        .cat.active { background: var(--text); color: var(--bg); border-color: var(--text); }
+        main { max-width: 760px; margin: 0 auto; padding: 0.5rem 1rem 2rem; }
+        .notice { margin: 0.75rem 0; padding: 0.6rem 0.8rem; border-radius: 10px; background: var(--gold-soft); color: var(--text); font-size: 0.85rem; }
+        section { scroll-margin-top: 120px; }
+        h2 { font-family: 'Playfair Display', Georgia, serif; font-size: 1.3rem; margin: 1.4rem 0 0.6rem; display: flex; align-items: center; gap: 0.45rem; }
+        .item { display: flex; gap: 0.85rem; padding: 0.85rem; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; margin-bottom: 0.6rem; }
+        .item.off { opacity: 0.6; }
+        .info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+        .name { font-weight: 600; font-size: 1rem; }
+        .desc { color: var(--text-2); font-size: 0.85rem; }
+        .opts { color: var(--muted); font-size: 0.78rem; }
+        .price { margin-top: auto; padding-top: 0.25rem; font-weight: 700; color: var(--gold); display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+        .badge-off { font-size: 0.72rem; font-weight: 700; color: var(--off); border: 1px solid currentColor; border-radius: 999px; padding: 0.05rem 0.5rem; }
+        .photo { width: 96px; height: 96px; border-radius: 12px; object-fit: cover; flex-shrink: 0; background: var(--gold-soft); }
+        .ph { width: 96px; height: 96px; border-radius: 12px; flex-shrink: 0; background: var(--gold-soft); display: grid; place-items: center; font-size: 2rem; }
+        .empty { text-align: center; color: var(--muted); padding: 2.5rem 0; }
+        footer { text-align: center; color: var(--muted); font-size: 0.78rem; padding: 1.5rem 1rem 2.5rem; }
+        @media (min-width: 640px) { .photo, .ph { width: 120px; height: 120px; } }
+    </style>
+</head>
+<body>
+    <header class="hero">
+        <h1>Restaurant <span>Sissiman</span></h1>
+        <p id="city">Bobo-Dioulasso, Burkina Faso</p>
+        <div class="table-chip" id="tableChip" hidden></div>
+    </header>
+    <div class="bar">
+        <input class="search" id="search" type="search" placeholder="Rechercher un plat ou une boisson..." aria-label="Rechercher dans le menu">
+        <nav class="cats" id="cats" aria-label="Categories"></nav>
+    </div>
+    <main id="menu" aria-live="polite"><p class="empty">Chargement du menu...</p></main>
+    <footer>Prix en FCFA, service compris · Demandez a votre serveur pour commander</footer>
+
+    <script>
+        (function () {
+            var state = { data: null, query: '', cat: 'all' };
+            var esc = function (s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; };
+            var fmt = function (n) { return new Intl.NumberFormat('fr-FR').format(n) + ' FCFA'; };
+            var params = new URLSearchParams(location.search);
+            var table = params.get('table');
+            if (table && /^[0-9A-Za-z-]{1,8}$/.test(table)) {
+                var chip = document.getElementById('tableChip');
+                chip.textContent = 'Table ' + table;
+                chip.hidden = false;
+            }
+
+            function render() {
+                var d = state.data;
+                var main = document.getElementById('menu');
+                if (!d) return;
+                var q = state.query.trim().toLowerCase();
+                var cats = d.categories.filter(function (c) { return d.items.some(function (i) { return i.category === c.id; }); });
+                var others = d.items.filter(function (i) { return !d.categories.some(function (c) { return c.id === i.category; }); });
+                if (others.length) cats.push({ id: '__autres', name: 'Autres', icon: '' });
+                document.getElementById('cats').innerHTML = '<button class="cat' + (state.cat === 'all' ? ' active' : '') + '" data-cat="all">Tout</button>' +
+                    cats.map(function (c) { return '<button class="cat' + (state.cat === c.id ? ' active' : '') + '" data-cat="' + esc(c.id) + '">' + esc((c.icon ? c.icon + ' ' : '') + c.name) + '</button>'; }).join('');
+                var html = cats.filter(function (c) { return state.cat === 'all' || state.cat === c.id; }).map(function (c) {
+                    var items = d.items.filter(function (i) {
+                        var inCat = c.id === '__autres' ? others.indexOf(i) !== -1 : i.category === c.id;
+                        return inCat && (!q || i.name.toLowerCase().indexOf(q) !== -1 || (i.desc || '').toLowerCase().indexOf(q) !== -1);
+                    }).sort(function (a, b) { return (b.available ? 1 : 0) - (a.available ? 1 : 0); });
+                    if (!items.length) return '';
+                    return '<section id="cat-' + esc(c.id) + '"><h2>' + esc(c.icon || '') + ' ' + esc(c.name) + '</h2>' + items.map(function (i) {
+                        var opts = [];
+                        if (i.sides.length) opts.push('Au choix : ' + i.sides.join(', '));
+                        if (i.extras.length) opts.push('Supplements : ' + i.extras.map(function (e) { return e.name + ' +' + fmt(e.price); }).join(', '));
+                        var visual = i.photo ? '<img class="photo" src="' + esc(i.photo) + '" alt="' + esc(i.name) + '" loading="lazy" decoding="async">' : '<div class="ph" aria-hidden="true">' + esc(c.icon || '🍽️') + '</div>';
+                        return '<article class="item' + (i.available ? '' : ' off') + '"><div class="info">' +
+                            '<div class="name">' + esc(i.name) + '</div>' +
+                            (i.desc ? '<div class="desc">' + esc(i.desc) + '</div>' : '') +
+                            (opts.length ? '<div class="opts">' + esc(opts.join(' · ')) + '</div>' : '') +
+                            '<div class="price">' + fmt(i.price) + (i.available ? '' : '<span class="badge-off">Epuise aujourd\'hui</span>') + '</div>' +
+                            '</div>' + visual + '</article>';
+                    }).join('') + '</section>';
+                }).join('');
+                main.innerHTML = (state.offline ? '<p class="notice">Connexion indisponible : voici le dernier menu enregistre sur votre telephone.</p>' : '') +
+                    (html || '<p class="empty">Aucun plat ne correspond a votre recherche.</p>');
+            }
+
+            document.getElementById('cats').addEventListener('click', function (e) {
+                var b = e.target.closest('.cat');
+                if (!b) return;
+                state.cat = b.dataset.cat;
+                render();
+                window.scrollTo({ top: document.querySelector('.bar').offsetTop, behavior: 'smooth' });
+            });
+            document.getElementById('search').addEventListener('input', function (e) { state.query = e.target.value; render(); });
+
+            try {
+                var cached = localStorage.getItem('sissiman-public-menu');
+                if (cached) { state.data = JSON.parse(cached); render(); }
+            } catch (e) { /* stockage indisponible */ }
+
+            fetch('/api/public/menu').then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            }).then(function (data) {
+                state.data = data;
+                state.offline = false;
+                try { localStorage.setItem('sissiman-public-menu', JSON.stringify(data)); } catch (e) { /* stockage plein */ }
+                render();
+            }).catch(function () {
+                if (state.data) { state.offline = true; render(); }
+                else document.getElementById('menu').innerHTML = '<p class="empty">Le menu ne peut pas etre charge. Verifiez votre connexion et reessayez.</p>';
+            });
+        })();
+    </script>
+</body>
+</html>

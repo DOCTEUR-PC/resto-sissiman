@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=20261020a">
+    <link rel="stylesheet" href="styles.css?v=20261020b">
 </head>
 <body>
     <!-- LOGIN -->
@@ -266,6 +266,7 @@
             <div class="page-actions">
                 <button class="btn btn-primary" data-perm="menu.manage" onclick="App.menu.openAddModal()">+ Ajouter un plat</button>
                 <button class="btn btn-secondary" data-perm="menu.manage" onclick="App.menu.openCategoryModal()">+ Categorie</button>
+                <button class="btn btn-secondary" data-perm="menu.manage" onclick="App.menuQr.open()">QR code du menu</button>
             </div>
             <div class="menu-management">
                 <div class="menu-cats-sidebar" id="menuCatsSidebar"></div>
@@ -847,9 +848,31 @@
         </div>
     </div>
 
+    <div class="modal" id="modalMenuQr">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Menu numerique</h3>
+                <button class="modal-close" onclick="App.menuQr.close()">&times;</button>
+            </div>
+            <div class="modal-body menu-qr-body">
+                <p class="form-hint">Les clients scannent ce code avec l'appareil photo de leur telephone pour voir le menu, les prix et les plats disponibles. Le menu se met a jour automatiquement.</p>
+                <div class="menu-qr-preview" id="menuQrPreview"></div>
+                <div class="menu-qr-link">
+                    <input type="text" id="menuQrUrl" readonly aria-label="Lien du menu">
+                    <button class="btn btn-secondary" onclick="App.menuQr.copy()">Copier</button>
+                    <button class="btn btn-secondary" onclick="App.menuQr.preview()">Ouvrir</button>
+                </div>
+                <div class="menu-qr-actions">
+                    <button class="btn btn-primary" onclick="App.menuQr.printPoster()">Imprimer l'affiche (A4)</button>
+                    <button class="btn btn-secondary" onclick="App.menuQr.printTables()">Imprimer un QR par table</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="viz-tip" id="vizTip" role="tooltip" hidden></div>
     <div id="printArea" aria-hidden="true"></div>
 
-    <script src="app.js?v=20261020a"></script>
+    <script src="app.js?v=20261020b"></script>
 </body>
 </html>

@@ -1135,11 +1135,65 @@ async function updateRoles(request, db, user) {
     return getRoles(db);
 }
 
+// ---------- MENU PUBLIC (QR code) ----------
+// No login: only what a customer may see (no recipes, costs or internal ids beyond the item id).
+
+async function publicMenu(db) {
+    const { results } = await db.prepare(`SELECT collection, data FROM records WHERE deleted = 0
+        AND collection IN ('categories', 'menuItems')`).all();
+    const categories = [], items = [];
+    for (const r of results) {
+        const d = JSON.parse(r.data);
+        if (r.collection === 'categories') categories.push({ id: d.id, name: d.name, icon: d.icon || '' });
+        else {
+            const o = d.options || {};
+            items.push({
+                id: d.id, name: d.name, desc: d.desc || '', price: d.price, category: d.category, available: d.available !== false,
+                photo: d.photo ? `/api/public/photo/${d.id}?v=${(await sha256(d.photo)).slice(0, 10)}` : null,
+                sides: o.sides || [], extras: (o.extras || []).map(e => ({ name: e.name, price: e.price })), prefs: o.prefs || []
+            });
+        }
+    }
+    items.sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+    return { restaurant: { name: 'Restaurant Sissiman', city: 'Bobo-Dioulasso, Burkina Faso', currency: 'FCFA' }, categories, items, at: Date.now() };
+}
+
+async function publicPhoto(db, id) {
+    const row = await db.prepare(`SELECT json_extract(data, '$.photo') AS photo FROM records
+        WHERE collection = 'menuItems' AND id = ? AND deleted = 0`).bind(id).first();
+    const m = row && row.photo && row.photo.match(/^data:(image\/(?:jpeg|webp|png));base64,([A-Za-z0-9+/]+=*)$/);
+    if (!m) return new Response('Introuvable', { status: 404 });
+    const bin = Uint8Array.from(atob(m[2]), ch => ch.charCodeAt(0));
+    // The URL carries a content hash, so the image can be cached for a long time.
+    return new Response(bin, { headers: { 'Content-Type': m[1], 'Cache-Control': 'public, max-age=604800, immutable', 'X-Content-Type-Options': 'nosniff' } });
+}
+
+async function handlePublic(request, env, url, ctx) {
+    if (request.method !== 'GET') return fail(405, 'Methode non autorisee');
+    const cache = caches.default;
+    const hit = await cache.match(request);
+    if (hit) return hit;
+    let res;
+    if (url.pathname === '/api/public/menu') {
+        res = new Response(JSON.stringify(await publicMenu(env.DB)), {
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=60', 'X-Content-Type-Options': 'nosniff' }
+        });
+    } else {
+        const pm = url.pathname.match(/^\/api\/public\/photo\/([a-zA-Z0-9_-]{1,100})$/);
+        res = pm ? await publicPhoto(env.DB, pm[1]) : fail(404, 'Introuvable');
+    }
+    if (res.ok && ctx) ctx.waitUntil(cache.put(request, res.clone()));
+    return res;
+}
+
 // ---------- ROUTER ----------
 
 export default {
-    async fetch(request, env) {
+    async fetch(request, env, ctx) {
         const url = new URL(request.url);
+        if (url.pathname.startsWith('/api/public/')) {
+            try { return await handlePublic(request, env, url, ctx); } catch (e) { console.error(e); return fail(500, 'Erreur serveur'); }
+        }
         if (url.pathname.startsWith('/api/')) return handleApi(request, env, url);
         return env.ASSETS.fetch(request);
     }

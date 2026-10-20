@@ -2341,6 +2341,32 @@ body {
     background: var(--bg-secondary);
 }
 
+/* MENU NUMERIQUE (QR) */
+.menu-qr-body { display: grid; gap: 0.9rem; }
+.menu-qr-preview { display: grid; place-items: center; padding: 0.5rem; }
+.menu-qr-preview .qr-svg { border-radius: 8px; box-shadow: 0 0 0 1px var(--border); }
+.menu-qr-link { display: flex; gap: 0.4rem; }
+.menu-qr-link input { flex: 1; min-width: 0; padding: 0.6rem 0.75rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-light); color: var(--text); font: inherit; font-size: 0.85rem; }
+.menu-qr-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.menu-qr-actions .btn { flex: 1 1 12rem; }
+
+#printArea .qr-print { page: qr; color: #111; font-family: var(--font); }
+@page qr { size: A4; margin: 10mm; }
+.qr-poster { text-align: center; padding-top: 18mm; }
+.qr-poster-name { font-family: var(--font-display); font-size: 34px; font-weight: 700; }
+.qr-poster-name span { color: #a57d2c; }
+.qr-poster-sub { font-size: 14px; color: #555; margin-bottom: 14mm; }
+.qr-poster-title { font-size: 24px; font-weight: 700; margin-bottom: 8mm; }
+.qr-poster .qr-svg { width: 110mm; height: 110mm; }
+.qr-poster-help { font-size: 16px; margin-top: 8mm; }
+.qr-poster-url { font-size: 12px; color: #555; margin-top: 3mm; }
+.qr-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6mm; }
+.qr-card { border: 1px dashed #999; border-radius: 4mm; padding: 5mm 3mm; text-align: center; break-inside: avoid; }
+.qr-card .qr-svg { width: 45mm; height: 45mm; }
+.qr-card-name { font-family: var(--font-display); font-size: 13px; font-weight: 700; margin-bottom: 2mm; }
+.qr-card-table { font-size: 20px; font-weight: 800; margin-top: 2mm; }
+.qr-card-help { font-size: 10px; color: #555; }
+
 /* RAPPORTS */
 .report-bar { display: flex; justify-content: space-between; align-items: flex-end; gap: 0.75rem 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
 .report-tabs { margin-bottom: 0; flex: 1 1 28rem; }
