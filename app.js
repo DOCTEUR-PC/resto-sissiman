@@ -606,11 +606,15 @@ const App = {
         this.reloadForRestaurant(page || (id ? 'dashboard' : 'plateforme'));
     },
 
+    DESIGNER_BRAND: 'Espace Concepteur',
+
     brandName() {
+        if (this.restaurant && this.restaurant.slug === 'docteurpc') return this.DESIGNER_BRAND;
         return (this.restaurant && this.restaurant.name) || 'Resto Docteur PC';
     },
 
     brandCity() {
+        if (this.restaurant && this.restaurant.slug === 'docteurpc') return 'Docteur PC · Bobo-Dioulasso';
         return (this.restaurant && this.restaurant.city) || '';
     },
 
@@ -640,10 +644,31 @@ const App = {
         } catch (e) { /* stockage indisponible */ }
         const input = document.getElementById('loginRestaurant');
         if (!input.value) input.value = code;
-        const known = data && data.slug === input.value ? data : null;
-        document.getElementById('loginBrand').innerHTML = known ? this.esc(known.name) + ' ✦' : 'Resto <span>Docteur PC</span> ✦';
-        document.getElementById('loginCity').textContent = known && known.city ? known.city : 'Une solution Docteur PC · Bobo-Dioulasso';
+        this.loginKnown = data;
+        this.loginBrand();
+        if (!input.dataset.brandWired) {
+            input.dataset.brandWired = '1';
+            input.addEventListener('input', () => this.loginBrand());
+        }
         (input.value ? document.getElementById('loginUser') : input).focus();
+    },
+
+    // Login header follows the code typed: the designer space, a restaurant this device knows, or the product name.
+    loginBrand() {
+        const code = document.getElementById('loginRestaurant').value.trim().toLowerCase();
+        const known = this.loginKnown && this.loginKnown.slug === code ? this.loginKnown : null;
+        const brand = document.getElementById('loginBrand');
+        const city = document.getElementById('loginCity');
+        if (code === 'docteurpc') {
+            brand.innerHTML = 'Espace <span>Concepteur</span> ✦';
+            city.textContent = 'Docteur PC · Bobo-Dioulasso';
+        } else if (known) {
+            brand.innerHTML = this.esc(known.name) + ' ✦';
+            city.textContent = known.city || 'Une solution Docteur PC · Bobo-Dioulasso';
+        } else {
+            brand.innerHTML = 'Resto <span>Docteur PC</span> ✦';
+            city.textContent = 'Une solution Docteur PC · Bobo-Dioulasso';
+        }
     },
 
     renderSubBanner() {
