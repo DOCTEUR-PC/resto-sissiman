@@ -260,7 +260,7 @@ async function login(request, db) {
     await ensureBootstrap(db);
     const restaurant = await restaurantBySlug(db, code);
     const s = restaurant
-        ? await db.prepare('SELECT * FROM staff WHERE restaurant_id = ? AND username = ?').bind(restaurant.id, username).first()
+        ? await db.prepare("SELECT * FROM staff WHERE restaurant_id = ? AND lower(username) = lower(?) ORDER BY username = ? DESC LIMIT 1").bind(restaurant.id, username, username).first()
         : null;
     const hash = await hashPassword(password, s ? s.pass_salt : 'no-such-user');
     if (!s || !safeEqual(hash, s.pass_hash)) {
