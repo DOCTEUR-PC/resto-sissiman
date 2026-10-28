@@ -173,8 +173,21 @@ const publicRestaurant = (r, user) => ({
     ...(user && user.acting ? { acting: true, homeSlug: user.home_slug } : {})
 });
 
+// "Sissiman", " sissiman ", "Restaurant Sissiman" or "Chez Awa" all lead to their code: staff type what they read.
+const normalizeCode = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim()
+    .replace(/[\s_]+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '');
+
 async function restaurantBySlug(db, slug) {
-    if (slug) return db.prepare('SELECT * FROM restaurants WHERE slug = ?').bind(String(slug).toLowerCase().trim()).first();
+    if (slug) {
+        const code = normalizeCode(slug);
+        if (!code) return null;
+        const exact = await db.prepare('SELECT * FROM restaurants WHERE slug = ?').bind(code).first();
+        if (exact) return exact;
+        // Then the restaurant's name, with or without a leading "restaurant" / "maquis".
+        const { results } = await db.prepare('SELECT * FROM restaurants').all();
+        const bare = c => c.replace(/^(restaurant|resto|maquis)-/, '');
+        return results.find(r => normalizeCode(r.name) === code || bare(normalizeCode(r.name)) === bare(code) || r.slug === bare(code)) || null;
+    }
     // Devices installed before multi-restaurant send no code: they belong to the first (pilot) restaurant.
     return db.prepare('SELECT * FROM restaurants WHERE id != ? ORDER BY created_at, id LIMIT 1').bind(PLATFORM_RID).first();
 }
@@ -257,7 +270,7 @@ async function login(request, db) {
             db.prepare(`INSERT INTO login_attempts (key, fails, locked_until) VALUES (?, ?, ?)
                 ON CONFLICT (key) DO UPDATE SET fails = excluded.fails, locked_until = excluded.locked_until`)
                 .bind(attemptKey, lockedUntil ? 0 : fails, lockedUntil),
-            auditStmt(db, null, 'login_echec', 'staff', null, { username: username.slice(0, 40), ip, verrouille: !!lockedUntil }, restaurant ? restaurant.id : null)
+            auditStmt(db, null, 'login_echec', 'staff', null, { username: username.slice(0, 40), ip, verrouille: !!lockedUntil, ...(restaurant ? {} : { code: code.slice(0, 40) }) }, restaurant ? restaurant.id : null)
         ]);
         if (lockedUntil) return fail(429, 'Trop de tentatives. Reessayez dans 15 min.');
         return fail(401, restaurant ? 'Identifiant ou mot de passe incorrect' : 'Code restaurant inconnu');
